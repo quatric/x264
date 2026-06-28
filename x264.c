@@ -1009,7 +1009,9 @@ typedef enum
     OPT_DTS_COMPRESSION,
     OPT_OUTPUT_CSP,
     OPT_INPUT_RANGE,
-    OPT_RANGE
+    OPT_RANGE,
+    OPT_MOBICLIP,
+    OPT_MOFLEX
 } OptionsOPT;
 
 static char short_options[] = "8A:B:b:f:hI:i:m:o:p:q:r:t:Vvw";
@@ -1183,6 +1185,8 @@ static struct option long_options[] =
     { "input-range",          required_argument, NULL, OPT_INPUT_RANGE },
     { "stitchable",           no_argument,       NULL, 0 },
     { "filler",               no_argument,       NULL, 0 },
+    { "mobiclip",           required_argument, NULL, OPT_MOBICLIP },
+    { "moflex",             no_argument,       NULL, OPT_MOFLEX },
     { NULL,                   0,                 NULL, 0 }
 };
 
@@ -1192,7 +1196,12 @@ static int select_output( const char *muxer, char *filename, x264_param_t *param
     if( !strcmp( filename, "-" ) || strcasecmp( muxer, "auto" ) )
         ext = muxer;
 
-    if( !strcasecmp( ext, "mp4" ) )
+    if( !strcasecmp( ext, "mo" ) )
+    {
+        param->i_mobiclip = 1;
+        cli_output = raw_output;
+    }
+    else if( !strcasecmp( ext, "mp4" ) )
     {
 #if HAVE_GPAC || HAVE_LSMASH
         cli_output = mp4_output;
@@ -1563,6 +1572,12 @@ static int parse( int argc, char **argv, x264_param_t *param, cli_opt_t *opt )
                 break;
             case OPT_DTS_COMPRESSION:
                 output_opt.use_dts_compress = 1;
+                break;
+            case OPT_MOBICLIP:
+                param->i_mobiclip = atoi( optarg );
+                break;
+            case OPT_MOFLEX:
+                param->b_moflex = 1;
                 break;
             case OPT_OUTPUT_CSP:
                 FAIL_IF_ERROR( parse_enum_value( optarg, x264_output_csp_names, &output_csp ), "Unknown output csp `%s'\n", optarg );

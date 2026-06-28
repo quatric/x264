@@ -72,7 +72,24 @@ void x264_nal_encode( x264_t *h, uint8_t *dst, x264_nal_t *nal )
     /* nal header */
     *dst++ = ( 0x00 << 7 ) | ( nal->i_ref_idc << 5 ) | nal->i_type;
 
-    dst = h->bsf.nal_escape( dst, src, end );
+    if( h->param.i_mobiclip )
+    {
+        /* Mobiclip does not use H.264 RBSP emulation prevention.
+         * The standard big-endian bitstream writer produces BE byte pairs;
+         * the Mobiclip decoder's bswap16_buf expects LE16 pairs, so swap
+         * each 16-bit word (byte-pair) before copying. */
+        int n = (int)(end - src);
+        for( int i = 0; i + 1 < n; i += 2 )
+        {
+            dst[i]   = src[i+1];
+            dst[i+1] = src[i];
+        }
+        if( n & 1 )
+            dst[n-1] = src[n-1];
+        dst += n;
+    }
+    else
+        dst = h->bsf.nal_escape( dst, src, end );
     int size = dst - orig_dst;
 
     /* Apply AVC-Intra padding */

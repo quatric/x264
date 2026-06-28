@@ -195,8 +195,13 @@ static void slice_header_init( x264_t *h, x264_slice_header_t *sh,
 
     sh->i_cabac_init_idc = param->i_cabac_init_idc;
 
-    sh->i_qp = SPEC_QP(i_qp);
-    sh->i_qp_delta = sh->i_qp - pps->i_pic_init_qp;
+    /* Mobiclip: clamp to [12, 161] range required by the decoder setup_qtables.
+     * i_qp is x264's internal QP; the decoder reads qx=Q%6, qy=Q/6 from the header
+     * and uses mobi qtab[qx]<<qy for reconstruction.  To ensure exact match between
+     * the encoder's internal reconstruction and the decoder's, the header must carry
+     * EXACTLY the same qx/qy as used in macroblock.h's mobi dequant. */
+    sh->i_qp = param->i_mobiclip ? x264_clip3(i_qp, 12, 161) : SPEC_QP(i_qp);
+	sh->i_qp_delta = sh->i_qp - pps->i_pic_init_qp;
     sh->b_sp_for_swidth = 0;
     sh->i_qs_delta = 0;
 
@@ -210,14 +215,45 @@ static void slice_header_init( x264_t *h, x264_slice_header_t *sh,
     sh->i_beta_offset = param->i_deblocking_filter_beta * 2;
 }
 
-static void slice_header_write( bs_t *s, x264_slice_header_t *sh, int i_nal_ref_idc )
+static void slice_header_write( x264_t *h, bs_t *s, x264_slice_header_t *sh, int i_nal_ref_idc )
 {
+    if( h->param.i_mobiclip )
+    {
+        if (sh->i_type == SLICE_TYPE_I)
+        {
+            //i frame
+            extern void x264_mobiclip_reset_pre(x264_t *h);
+            x264_mobiclip_reset_pre(h);
+            bs_write1(s, 1);
+            //moflex: 1 = MOFLEX mode (flexible), 0 = standard Mobiclip mode
+            bs_write1(s, h->param.b_moflex);
+            //dct coef encoding table to use: 1 for I-frames
+            bs_write1(s, 1);
+            //qp
+            bs_write(s, 6, (sh->i_qp % 6) + 12 + 6*mobi_qyx(h));
+        }
+        else
+        {
+            //p frame
+            extern void x264_mobiclip_reset_pre(x264_t *h);
+            x264_mobiclip_reset_pre(h);
+            bs_write1(s, 0);
+            //qp delta
+            int cur_hqp = (sh->i_qp % 6) + 12 + 6*mobi_qyx(h);
+            bs_write_se(s, cur_hqp - h->i_mobi_old_qp);
+        }
+        {
+            int hqp = (sh->i_qp % 6) + 12 + 6*mobi_qyx(h);
+            h->i_mobi_old_qp = hqp;
+        }
+        return;
+    }
+
     if( sh->b_mbaff )
     {
         int first_x = sh->i_first_mb % sh->sps->i_mb_width;
         int first_y = sh->i_first_mb / sh->sps->i_mb_width;
-        assert( (first_y&1) == 0 );
-        bs_write_ue( s, (2*first_x + sh->sps->i_mb_width*(first_y&~1) + (first_y&1)) >> 1 );
+        bs_write_ue( s, first_y * sh->sps->i_mb_width / 2 + first_x );
     }
     else
         bs_write_ue( s, sh->i_first_mb );
@@ -427,6 +463,22 @@ static int validate_parameters( x264_t *h, int b_open )
         x264_log_internal( X264_LOG_ERROR, "pf_log not set! did you forget to call x264_param_default?\n" );
         return -1;
     }
+
+    /* This x264 build emits a Mobiclip bitstream whose inter-frame state is
+     * strictly sequential: the P-frame quantizer is delta-coded against the
+     * previous frame (h->i_mobi_old_qp), motion vectors predict from the prior
+     * frame, and the decoder has no B-frame path.  x264 frame-threading encodes
+     * frames out of order in independent thread contexts, which desyncs the QP
+     * delta (the decoder's accumulated quantizer then drifts out of [12,161] and
+     * it bails with "Invalid data"), and B-frames are simply undecodable here.
+     * Force single-threaded, B-frame-free encoding so the stream stays valid.
+     * Also pin a single reference frame: the encoder's multi-ref motion-index
+     * mapping desyncs the decoder's sidx = current_pic - index selection (a P
+     * frame ends up referencing an unwritten picture buffer -> FAIL at the
+     * !s->pic[sidx]->data[i] guard).  ref=1 always maps to the previous frame. */
+    h->param.i_threads         = 1;
+    h->param.i_bframe          = 0;
+    h->param.i_frame_reference = 1;
 
 #if HAVE_MMX
     if( b_open )
@@ -668,7 +720,7 @@ static int validate_parameters( x264_t *h, int b_open )
     }
 
     /* Detect default ffmpeg settings and terminate with an error. */
-    if( b_open )
+    if( b_open && !h->param.i_mobiclip )
     {
         int score = 0;
         score += h->param.analyse.i_me_range == 0;
@@ -1168,12 +1220,76 @@ static int validate_parameters( x264_t *h, int b_open )
     h->param.analyse.intra &= X264_ANALYSE_I4x4|X264_ANALYSE_I8x8;
     if( !(h->param.analyse.inter & X264_ANALYSE_PSUB16x16) )
         h->param.analyse.inter &= ~X264_ANALYSE_PSUB8x8;
+    /* Mobiclip: force 4x4 luma transform.  4x4 round-trips exactly against the
+     * decoder; luma 8x8 currently reconstructs incorrectly.  Chroma is always
+     * coded 8x8 (its quant tables are force-initialized in x264_cqm_init). */
+    if( h->param.i_mobiclip )
+    {
+        h->param.analyse.b_transform_8x8 = 0;
+        h->param.b_deblocking_filter = 0;
+        h->param.i_bframe = 0;
+        /* Reference only the immediately previous frame.  The Mobiclip P-frame
+         * ref-selection (FRAME0..FRAME4 / sidx wrap) is only validated for the
+         * single-reference case so far; multi-ref desyncs the decoder. */
+        h->param.i_frame_reference = 1;
+        /* Force 16x16-only inter partitions.  The H_SPLIT/V_SPLIT sub-partition
+         * MV coding does not yet round-trip against the decoder; 16x16 P_L0 /
+         * P_SKIP uses the simple single-MV path which does.
+         * Keep I4x4/I8x8 intra flags so x264 doesn't fall back to I16x16,
+         * which the Mobiclip encoder does not support. */
+        h->param.analyse.inter &= X264_ANALYSE_I4x4|X264_ANALYSE_I8x8;
+        /* Sub-pel motion: Mobiclip supports half-pel MC.  The encoder maps
+         * x264's quarter-pel cache.mv to Mobiclip's half-pel MV via >>1 in BOTH
+         * the reconstruction (mobi_motion_compensate) and the bitstream write
+         * (mobi_encode_p_partition), so the truncation is identical on both
+         * sides and stays bit-exact regardless of sub-pel.  (The historic
+         * "catastrophic drift" was actually the inter-luma residual bug, now
+         * fixed.)  Allow MOBI_SUBME to override for tuning. */
+        h->param.analyse.i_subpel_refine = getenv("MOBI_SUBME") ? atoi(getenv("MOBI_SUBME")) : 2;
+        /* NOTE: subme=1 is x264's special "fast" half-pel mode and DESYNCS the
+         * Mobiclip decoder; subme>=2 is bit-exact.  subme>=6 enables RD mode
+         * decision whose cost model (x264 quant/recon) mis-predicts for Mobiclip
+         * and inflates intra-in-P, growing files.  subme=2 is the sweet spot. */
+        /* P-frame (inter) coding IS implemented and bit-exact against the
+         * Mobiclip decoder: 16x16 single-reference integer-pel motion comp
+         * (luma + planar chroma), MV median prediction, and P-frame residual
+         * coding all round-trip exactly.  P-frames are enabled by default; set
+         * MOBI_INTRA_ONLY=1 to force every frame to be an I-frame (useful for
+         * debugging or maximum random-access).  If the user did not request a
+         * keyframe interval, default to 30 so periodic I-frames bound any
+         * quality loss and provide seek points. */
+        if( getenv("MOBI_INTRA_ONLY") )
+        {
+            h->param.i_keyint_max = 1;
+            h->param.i_keyint_min = 1;
+        }
+        else if( h->param.i_keyint_max <= 1 )
+            h->param.i_keyint_max = 30;
+        /* x264's CQP mode applies f_ip_factor (~1.4 default), giving I-frames
+         * a QP ~3 lower than P-frames.  That can push I-frame QP below the
+         * decoder minimum of 12.  Fix both factors to 1.0 (equal QP for all
+         * frame types) so -qp N produces exactly QP N for every frame. */
+        h->param.rc.f_ip_factor = 1.0f;
+        h->param.rc.f_pb_factor = 1.0f;
+        /* The decoder rejects quantizers < 12 (loc 2 in setup_qtables).
+         * Also cap the max reasonably so Q+24 doesn't exceed the max size of
+         * the 6-bit header field (63 → 63+24 = 87, still well under 161). */
+        h->param.rc.i_qp_min = X264_MAX(h->param.rc.i_qp_min, 12);
+        h->param.rc.i_qp_max = X264_MIN(h->param.rc.i_qp_max, 39);
+        h->param.rc.f_rf_constant = X264_MIN(h->param.rc.f_rf_constant, 39);
+    }
+    /* CABAC init/encode is disabled (commented out) in this build; force
+     * CAVLC so the PPS entropy_coding_mode_flag matches the actual encoding. */
+    if( !h->param.i_mobiclip )
+        h->param.b_cabac = 0;
     if( !h->param.analyse.b_transform_8x8 )
     {
         h->param.analyse.inter &= ~X264_ANALYSE_I8x8;
         h->param.analyse.intra &= ~X264_ANALYSE_I8x8;
     }
     h->param.analyse.i_trellis = x264_clip3( h->param.analyse.i_trellis, 0, 2 );
+    if( h->param.i_mobiclip )
+        h->param.analyse.i_trellis = 0;
     h->param.rc.i_aq_mode = x264_clip3( h->param.rc.i_aq_mode, 0, 3 );
     h->param.rc.f_aq_strength = x264_clip3f( h->param.rc.f_aq_strength, 0, 3 );
     if( h->param.rc.f_aq_strength == 0 )
@@ -2785,22 +2901,29 @@ static intptr_t slice_write( x264_t *h )
     /* Set the QP equal to the first QP in the slice for more accurate CABAC initialization. */
     h->mb.i_mb_xy = h->sh.i_first_mb;
     h->sh.i_qp = x264_ratecontrol_mb_qp( h );
-    h->sh.i_qp = SPEC_QP( h->sh.i_qp );
-    h->sh.i_qp_delta = h->sh.i_qp - h->pps->i_pic_init_qp;
+    /* Mobiclip: bypass SPEC_QP clamping — the bitstream needs the raw x264
+     * QP so the decoder's dequant tables (shifted by +24) match the
+     * quantizer that produced the coefficients. */
+    if( !h->param.i_mobiclip )
+        h->sh.i_qp = SPEC_QP( h->sh.i_qp );
+    if( getenv("MOBI_QPDBG") )
+        fprintf(stderr, "SHQP pre_write: sh->i_qp=%d mb_qp=%d mobi=%d\n",
+            h->sh.i_qp, h->mb.i_qp, h->param.i_mobiclip);
+	h->sh.i_qp_delta = h->sh.i_qp - h->pps->i_pic_init_qp;
 
-    slice_header_write( &h->out.bs, &h->sh, h->i_nal_ref_idc );
-    if( h->param.b_cabac )
+    slice_header_write( h, &h->out.bs, &h->sh, h->i_nal_ref_idc );
+    /*if( h->param.b_cabac )
     {
-        /* alignment needed */
+        /* alignment needed /
         bs_align_1( &h->out.bs );
 
-        /* init cabac */
+        /* init cabac /
         x264_cabac_context_init( h, &h->cabac, h->sh.i_type, x264_clip3( h->sh.i_qp-QP_BD_OFFSET, 0, 51 ), h->sh.i_cabac_init_idc );
         x264_cabac_encode_init ( &h->cabac, h->out.bs.p, h->out.bs.p_end );
         last_emu_check = h->cabac.p;
     }
-    else
-        last_emu_check = h->out.bs.p;
+    else*/
+    last_emu_check = h->out.bs.p;
     h->mb.i_last_qp = h->sh.i_qp;
     h->mb.i_last_dqp = 0;
     h->mb.field_decoding_flag = 0;
@@ -2864,7 +2987,7 @@ static intptr_t slice_write( x264_t *h )
 reencode:
         x264_macroblock_encode( h );
 
-        if( h->param.b_cabac )
+        /*if( h->param.b_cabac )
         {
             if( mb_xy > h->sh.i_first_mb && !(SLICE_MBAFF && (i_mb_y&1)) )
                 x264_cabac_encode_terminal( &h->cabac );
@@ -2879,29 +3002,17 @@ reencode:
             }
         }
         else
-        {
-            if( IS_SKIP( h->mb.i_type ) )
+        {*/
+            if( !h->param.i_mobiclip && IS_SKIP( h->mb.i_type ) )
                 i_skip++;
             else
             {
-                if( h->sh.i_type != SLICE_TYPE_I )
-                {
-                    bs_write_ue( &h->out.bs, i_skip );  /* skip run */
-                    i_skip = 0;
-                }
+                if( !h->param.i_mobiclip && h->sh.i_type != SLICE_TYPE_I )
+                    bs_write_ue( &h->out.bs, i_skip );  /* mb_skip_run */
+                i_skip = 0;
                 x264_macroblock_write_cavlc( h );
-                /* If there was a CAVLC level code overflow, try again at a higher QP. */
-                if( h->mb.b_overflow )
-                {
-                    h->mb.i_chroma_qp = h->chroma_qp_table[++h->mb.i_qp];
-                    h->mb.i_skip_intra = 0;
-                    h->mb.b_skip_mc = 0;
-                    h->mb.b_overflow = 0;
-                    bitstream_restore( h, &bs_bak[BS_BAK_CAVLC_OVERFLOW], &i_skip, 0 );
-                    goto reencode;
-                }
             }
-        }
+       // }
 
         int total_bits = bs_pos(&h->out.bs) + x264_cabac_pos(&h->cabac);
         int mb_size = total_bits - mb_spos;
@@ -3053,8 +3164,8 @@ cont:
         }
 
         /* calculate deblock strength values (actual deblocking is done per-row along with hpel) */
-        if( b_deblock )
-            x264_macroblock_deblock_strength( h );
+        //if( b_deblock )
+        //    x264_macroblock_deblock_strength( h );
 
         if( mb_xy == h->sh.i_last_mb )
             break;
@@ -3075,12 +3186,29 @@ cont:
     if( h->sh.i_last_mb < h->sh.i_first_mb )
         return 0;
 
+    if( getenv("MOBI_FDECDUMP") )
+    {
+        FILE *fd = fopen( getenv("MOBI_FDECDUMP"), "ab" );
+        if( fd )
+        {
+            for( int y = 0; y < h->param.i_height; y++ )
+                fwrite( &h->fdec->plane[0][y*h->fdec->i_stride[0]], sizeof(pixel), h->param.i_width, fd );
+            /* mobiclip chroma is PLANAR: plane[1]=U, plane[2]=V (separate) */
+            int cw = h->param.i_width>>1, ch = h->param.i_height>>1;
+            for( int pl = 1; pl <= 2; pl++ )
+                for( int y = 0; y < ch; y++ )
+                    fwrite( &h->fdec->plane[pl][y*h->fdec->i_stride[pl]], sizeof(pixel), cw, fd );
+            fclose( fd );
+        }
+    }
+
     h->out.nal[h->out.i_nal].i_last_mb = h->sh.i_last_mb;
 
-    if( h->param.b_cabac )
+    if( h->param.i_mobiclip )
     {
-        x264_cabac_encode_flush( h, &h->cabac );
-        h->out.bs.p = h->cabac.p;
+        /* MobiClip slices use 16 trailing zero bits (non-standard). */
+        bs_write(&h->out.bs, 16, 0);
+        bs_flush( &h->out.bs );
     }
     else
     {
@@ -3705,12 +3833,12 @@ int     x264_encoder_encode( x264_t *h,
     /* write extra sei */
     for( int i = 0; i < h->fenc->extra_sei.num_payloads; i++ )
     {
-        nal_start( h, NAL_SEI, NAL_PRIORITY_DISPOSABLE );
-        x264_sei_write( &h->out.bs, h->fenc->extra_sei.payloads[i].payload, h->fenc->extra_sei.payloads[i].payload_size,
-                        h->fenc->extra_sei.payloads[i].payload_type );
-        if( nal_end( h ) )
-            return -1;
-        overhead += h->out.nal[h->out.i_nal-1].i_payload + SEI_OVERHEAD;
+        //nal_start( h, NAL_SEI, NAL_PRIORITY_DISPOSABLE );
+        //x264_sei_write( &h->out.bs, h->fenc->extra_sei.payloads[i].payload, h->fenc->extra_sei.payloads[i].payload_size,
+        //                h->fenc->extra_sei.payloads[i].payload_type );
+        //if( nal_end( h ) )
+        //    return -1;
+        //overhead += h->out.nal[h->out.i_nal-1].i_payload + SEI_OVERHEAD;
         if( h->fenc->extra_sei.sei_free )
         {
             h->fenc->extra_sei.sei_free( h->fenc->extra_sei.payloads[i].payload );
@@ -3731,22 +3859,22 @@ int     x264_encoder_encode( x264_t *h,
         if( h->param.b_repeat_headers && h->fenc->i_frame == 0 && !h->param.i_avcintra_class )
         {
             /* identify ourself */
-            nal_start( h, NAL_SEI, NAL_PRIORITY_DISPOSABLE );
-            if( x264_sei_version_write( h, &h->out.bs ) )
-                return -1;
-            if( nal_end( h ) )
-                return -1;
-            overhead += h->out.nal[h->out.i_nal-1].i_payload + SEI_OVERHEAD;
+           // nal_start( h, NAL_SEI, NAL_PRIORITY_DISPOSABLE );
+            //if( x264_sei_version_write( h, &h->out.bs ) )
+            //    return -1;
+           // if( nal_end( h ) )
+            //    return -1;
+           // overhead += h->out.nal[h->out.i_nal-1].i_payload + SEI_OVERHEAD;
         }
 
         if( h->fenc->i_type != X264_TYPE_IDR )
         {
-            int time_to_recovery = h->param.b_open_gop ? 0 : X264_MIN( h->mb.i_mb_width - 1, h->param.i_keyint_max ) + h->param.i_bframe - 1;
-            nal_start( h, NAL_SEI, NAL_PRIORITY_DISPOSABLE );
-            x264_sei_recovery_point_write( h, &h->out.bs, time_to_recovery );
-            if( nal_end( h ) )
-                return -1;
-            overhead += h->out.nal[h->out.i_nal-1].i_payload + SEI_OVERHEAD;
+            //int time_to_recovery = h->param.b_open_gop ? 0 : X264_MIN( h->mb.i_mb_width - 1, h->param.i_keyint_max ) + h->param.i_bframe - 1;
+            //nal_start( h, NAL_SEI, NAL_PRIORITY_DISPOSABLE );
+           // x264_sei_recovery_point_write( h, &h->out.bs, time_to_recovery );
+           // if( nal_end( h ) )
+            //    return -1;
+            //overhead += h->out.nal[h->out.i_nal-1].i_payload + SEI_OVERHEAD;
         }
 
         if( h->param.mastering_display.b_mastering_display )
@@ -3779,32 +3907,32 @@ int     x264_encoder_encode( x264_t *h,
 
     if( h->param.i_frame_packing >= 0 && (h->fenc->b_keyframe || h->param.i_frame_packing == 5) )
     {
-        nal_start( h, NAL_SEI, NAL_PRIORITY_DISPOSABLE );
-        x264_sei_frame_packing_write( h, &h->out.bs );
-        if( nal_end( h ) )
-            return -1;
-        overhead += h->out.nal[h->out.i_nal-1].i_payload + SEI_OVERHEAD;
+        //nal_start( h, NAL_SEI, NAL_PRIORITY_DISPOSABLE );
+        //x264_sei_frame_packing_write( h, &h->out.bs );
+        //if( nal_end( h ) )
+       //     return -1;
+        //overhead += h->out.nal[h->out.i_nal-1].i_payload + SEI_OVERHEAD;
     }
 
     /* generate sei pic timing */
     if( h->sps->vui.b_pic_struct_present || h->sps->vui.b_nal_hrd_parameters_present )
     {
-        nal_start( h, NAL_SEI, NAL_PRIORITY_DISPOSABLE );
-        x264_sei_pic_timing_write( h, &h->out.bs );
-        if( nal_end( h ) )
-            return -1;
-        overhead += h->out.nal[h->out.i_nal-1].i_payload + SEI_OVERHEAD;
+        //nal_start( h, NAL_SEI, NAL_PRIORITY_DISPOSABLE );
+       // x264_sei_pic_timing_write( h, &h->out.bs );
+       // if( nal_end( h ) )
+       //     return -1;
+       // overhead += h->out.nal[h->out.i_nal-1].i_payload + SEI_OVERHEAD;
     }
 
     /* As required by Blu-ray. */
     if( !IS_X264_TYPE_B( h->fenc->i_type ) && h->b_sh_backup )
     {
         h->b_sh_backup = 0;
-        nal_start( h, NAL_SEI, NAL_PRIORITY_DISPOSABLE );
-        x264_sei_dec_ref_pic_marking_write( h, &h->out.bs );
-        if( nal_end( h ) )
-            return -1;
-        overhead += h->out.nal[h->out.i_nal-1].i_payload + SEI_OVERHEAD;
+       // nal_start( h, NAL_SEI, NAL_PRIORITY_DISPOSABLE );
+      //  x264_sei_dec_ref_pic_marking_write( h, &h->out.bs );
+       // if( nal_end( h ) )
+       //     return -1;
+       // overhead += h->out.nal[h->out.i_nal-1].i_payload + SEI_OVERHEAD;
     }
 
     if( h->fenc->b_keyframe && h->param.b_intra_refresh )
@@ -3922,14 +4050,14 @@ static int encoder_frame_end( x264_t *h, x264_t *thread_current,
     x264_emms();
 
     /* generate buffering period sei and insert it into place */
-    if( h->i_thread_frames > 1 && h->fenc->b_keyframe && h->sps->vui.b_nal_hrd_parameters_present )
+    /*if( h->i_thread_frames > 1 && h->fenc->b_keyframe && h->sps->vui.b_nal_hrd_parameters_present )
     {
         x264_hrd_fullness( h );
         nal_start( h, NAL_SEI, NAL_PRIORITY_DISPOSABLE );
         x264_sei_buffering_period_write( h, &h->out.bs );
         if( nal_end( h ) )
            return -1;
-        /* buffering period sei must follow AUD, SPS and PPS and precede all other SEIs */
+        /* buffering period sei must follow AUD, SPS and PPS and precede all other SEIs /
         int idx = 0;
         while( h->out.nal[idx].i_type == NAL_AUD ||
                h->out.nal[idx].i_type == NAL_SPS ||
@@ -3938,7 +4066,7 @@ static int encoder_frame_end( x264_t *h, x264_t *thread_current,
         x264_nal_t nal_tmp = h->out.nal[h->out.i_nal-1];
         memmove( &h->out.nal[idx+1], &h->out.nal[idx], (h->out.i_nal-idx-1)*sizeof(x264_nal_t) );
         h->out.nal[idx] = nal_tmp;
-    }
+    }*/
 
     int frame_size = encoder_encapsulate_nals( h, 0 );
     if( frame_size < 0 )

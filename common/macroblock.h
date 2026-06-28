@@ -140,6 +140,20 @@ enum mb_partition_e
     X264_PARTTYPE_MAX = 17,
 };
 
+enum mb_mobi_p_part
+{
+	MOBI_P_PART_FRAME0_DELTA0 = 0,
+	MOBI_P_PART_FRAME0 = 1,
+	MOBI_P_PART_FRAME1 = 2,
+	MOBI_P_PART_FRAME2 = 3,
+	MOBI_P_PART_FRAME3 = 4,
+	MOBI_P_PART_FRAME4 = 5,
+	MOBI_P_PART_INTRA_FULL = 6, //intra block with one predictor for the whole block
+	MOBI_P_PART_INTRA_SUB = 7, //intra block with a predictor for each sub block
+	MOBI_P_PART_H_SPLIT = 8, //16x16 becomes 2 times 16x8 for example
+	MOBI_P_PART_V_SPLIT = 9  //16x16 becomes 2 times 8x16 for example
+};
+
 static const uint8_t x264_mb_partition_listX_table[2][17] =
 {{
     1, 1, 1, 1, /* D_L0_* */
@@ -419,6 +433,17 @@ static ALWAYS_INLINE uint64_t pack32to64( uint32_t a, uint32_t b )
 
 static ALWAYS_INLINE int x264_mb_predict_intra4x4_mode( x264_t *h, int idx )
 {
+    if( h->param.i_mobiclip )
+    {
+        int bx = block_idx_x[idx];
+        int by = block_idx_y[idx];
+        int mode_above = (by == 0) ? 9 : h->mb.cache.intra4x4_pred_mode[x264_scan8[block_idx_xy[bx][by-1]]];
+        int mode_left  = (bx == 0) ? 9 : h->mb.cache.intra4x4_pred_mode[x264_scan8[block_idx_xy[bx-1][by]]];
+        int m = X264_MIN( mode_above, mode_left );
+        if( m == 9 )
+            return I_PRED_4x4_DC;
+        return m;
+    }
     const int ma = h->mb.cache.intra4x4_pred_mode[x264_scan8[idx] - 1];
     const int mb = h->mb.cache.intra4x4_pred_mode[x264_scan8[idx] - 8];
     const int m  = X264_MIN( x264_mb_pred_mode4x4_fix(ma),

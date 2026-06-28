@@ -374,6 +374,10 @@ typedef struct x264_param_t
     int         i_avcintra_class;
     int         i_avcintra_flavor;
 
+    int i_mobiclip; /* 0 = standard H264, 1 = MO/MOFLEX (table 0), 2 = MODS (table 1) */
+    int b_moflex;   /* 1 = MOFLEX mode (flexible), 0 = standard Mobiclip mode */
+    int i_mobi_qyx; /* Mobiclip QY extension tier (0-15) */
+
     int         b_deblocking_filter;
     int         i_deblocking_filter_alphac0;    /* [-6, 6] -6 light filter, 6 strong */
     int         i_deblocking_filter_beta;       /* [-6, 6]  idem */

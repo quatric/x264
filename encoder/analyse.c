@@ -301,6 +301,13 @@ static void mb_analyse_init( x264_t *h, x264_mb_analysis_t *a, int qp )
     a->i_mbrd = (subme>=6) + (subme>=8) + (h->param.analyse.i_subpel_refine>=10);
     h->mb.b_deblock_rdo = h->param.analyse.i_subpel_refine >= 9 && h->sh.i_disable_deblocking_filter_idc != 1;
     a->b_early_terminate = h->param.analyse.i_subpel_refine < 11;
+    /* Mobiclip forces I_4x4 (see the intra type decision).  Early termination
+     * of the intra search can leave the per-4x4 prediction modes unanalysed
+     * (garbage), which then get written to the bitstream by the forced-I_4x4
+     * encode and desync the decoder.  Disable it so every 4x4 block always has
+     * a valid analysed mode.  (Dropped during the upstream-x264 rebase.) */
+    if( h->param.i_mobiclip )
+        a->b_early_terminate = 0;
 
     mb_analyse_init_qp( h, a, qp );
 
@@ -321,6 +328,7 @@ static void mb_analyse_init( x264_t *h, x264_mb_analysis_t *a, int qp )
     a->b_avoid_topright = 0;
     h->mb.i_skip_intra =
         h->mb.b_lossless ? 0 :
+        h->param.i_mobiclip ? 0 : /* Mobiclip: never skip intra re-encode (forced I_4x4) */
         a->i_mbrd ? 2 :
         !h->param.analyse.i_trellis && !h->param.analyse.i_noise_reduction;
 
@@ -332,9 +340,15 @@ static void mb_analyse_init( x264_t *h, x264_mb_analysis_t *a, int qp )
         // since the search may go a few iterations past its given range
         int i_fpel_border = 6; // umh: 1 for diamond, 2 for octagon, 2 for hpel
 
-        /* Calculate max allowed MV range */
-        h->mb.mv_min[0] = 4*( -16*h->mb.i_mb_x - 24 );
-        h->mb.mv_max[0] = 4*( 16*( h->mb.i_mb_width - h->mb.i_mb_x - 1 ) + 24 );
+        /* Calculate max allowed MV range.  x264 normally allows the MC to read
+         * up to 24 pixels into the padded border.  The Mobiclip decoder reads
+         * raw reference-frame data with NO border padding and rejects any MV
+         * whose block falls outside [0,width]x[0,height] (predict_motion bounds
+         * check), so restrict the range to keep the whole MB inside the frame
+         * (a small negative margin leaves room for the half-pel +1 sample). */
+        int mobi_border = h->param.i_mobiclip ? -20 : 24;
+        h->mb.mv_min[0] = 4*( -16*h->mb.i_mb_x - mobi_border );
+        h->mb.mv_max[0] = 4*( 16*( h->mb.i_mb_width - h->mb.i_mb_x - 1 ) + mobi_border );
         h->mb.mv_min_spel[0] = X264_MAX( h->mb.mv_min[0], -i_fmv_range );
         h->mb.mv_max_spel[0] = X264_MIN( h->mb.mv_max[0], i_fmv_range-1 );
         if( h->param.b_intra_refresh && h->sh.i_type == SLICE_TYPE_P )
@@ -388,8 +402,8 @@ static void mb_analyse_init( x264_t *h, x264_mb_analysis_t *a, int qp )
             }
             else
             {
-                h->mb.mv_min[1] = 4*( -16*mb_y - 24 );
-                h->mb.mv_max[1] = 4*( 16*( h->mb.i_mb_height - mb_y - 1 ) + 24 );
+                h->mb.mv_min[1] = 4*( -16*mb_y - (h->param.i_mobiclip ? -20 : 24) );
+                h->mb.mv_max[1] = 4*( 16*( h->mb.i_mb_height - mb_y - 1 ) + (h->param.i_mobiclip ? -20 : 24) );
                 h->mb.mv_min_spel[1] = X264_MAX( h->mb.mv_min[1], -i_fmv_range );
                 h->mb.mv_max_spel[1] = X264_MIN3( h->mb.mv_max[1], i_fmv_range-1, 4*thread_mvy_range );
                 h->mb.mv_limit_fpel[0][1] = (h->mb.mv_min_spel[1]>>2) + i_fpel_border;
@@ -2941,13 +2955,26 @@ intra_analysis:
             intra_rd( h, &analysis, COST_MAX );
 
         i_cost = analysis.i_satd_i16x16;
-        h->mb.i_type = I_16x16;
-        COPY2_IF_LT( i_cost, analysis.i_satd_i4x4, h->mb.i_type, I_4x4 );
-        COPY2_IF_LT( i_cost, analysis.i_satd_i8x8, h->mb.i_type, I_8x8 );
-        if( analysis.i_satd_pcm < i_cost )
-            h->mb.i_type = I_PCM;
+        if( h->param.i_mobiclip )
+        {
+            /* The Mobiclip decoder only supports per-4x4 intra prediction
+             * (I_4x4).  I_16x16 / I_8x8 macroblocks are encoded by encode_i_block
+             * in a form the decoder cannot parse and desync the whole frame.
+             * Always force I_4x4.  (The rebase to upstream x264 dropped this
+             * mobiclip constraint, which re-introduced I_16x16 MBs.) */
+            h->mb.i_type = I_4x4;
+            i_cost = analysis.i_satd_i4x4;
+        }
+        else
+        {
+            h->mb.i_type = I_16x16;
+            COPY2_IF_LT( i_cost, analysis.i_satd_i4x4, h->mb.i_type, I_4x4 );
+            COPY2_IF_LT( i_cost, analysis.i_satd_i8x8, h->mb.i_type, I_8x8 );
+            if( analysis.i_satd_pcm < i_cost )
+                h->mb.i_type = I_PCM;
+        }
 
-        else if( analysis.i_mbrd >= 2 )
+        if( analysis.i_mbrd >= 2 )
             intra_rd_refine( h, &analysis );
     }
     else if( h->sh.i_type == SLICE_TYPE_P )
@@ -3218,10 +3245,18 @@ skip_analysis:
                 intra_rd( h, &analysis, i_satd_inter * 5/4 + 1 );
             }
 
-            COPY2_IF_LT( i_cost, analysis.i_satd_i16x16, i_type, I_16x16 );
-            COPY2_IF_LT( i_cost, analysis.i_satd_i8x8, i_type, I_8x8 );
-            COPY2_IF_LT( i_cost, analysis.i_satd_i4x4, i_type, I_4x4 );
-            COPY2_IF_LT( i_cost, analysis.i_satd_pcm, i_type, I_PCM );
+            /* Mobiclip: only I_4x4 intra is supported (see intra_analysis). */
+            if( h->param.i_mobiclip )
+            {
+                COPY2_IF_LT( i_cost, analysis.i_satd_i4x4, i_type, I_4x4 );
+            }
+            else
+            {
+                COPY2_IF_LT( i_cost, analysis.i_satd_i16x16, i_type, I_16x16 );
+                COPY2_IF_LT( i_cost, analysis.i_satd_i8x8, i_type, I_8x8 );
+                COPY2_IF_LT( i_cost, analysis.i_satd_i4x4, i_type, I_4x4 );
+                COPY2_IF_LT( i_cost, analysis.i_satd_pcm, i_type, I_PCM );
+            }
 
             h->mb.i_type = i_type;
 
@@ -3613,10 +3648,18 @@ skip_analysis:
                 intra_rd( h, &analysis, i_satd_inter * 17/16 + 1 );
             }
 
-            COPY2_IF_LT( i_cost, analysis.i_satd_i16x16, i_type, I_16x16 );
-            COPY2_IF_LT( i_cost, analysis.i_satd_i8x8, i_type, I_8x8 );
-            COPY2_IF_LT( i_cost, analysis.i_satd_i4x4, i_type, I_4x4 );
-            COPY2_IF_LT( i_cost, analysis.i_satd_pcm, i_type, I_PCM );
+            /* Mobiclip: only I_4x4 intra is supported (see intra_analysis). */
+            if( h->param.i_mobiclip )
+            {
+                COPY2_IF_LT( i_cost, analysis.i_satd_i4x4, i_type, I_4x4 );
+            }
+            else
+            {
+                COPY2_IF_LT( i_cost, analysis.i_satd_i16x16, i_type, I_16x16 );
+                COPY2_IF_LT( i_cost, analysis.i_satd_i8x8, i_type, I_8x8 );
+                COPY2_IF_LT( i_cost, analysis.i_satd_i4x4, i_type, I_4x4 );
+                COPY2_IF_LT( i_cost, analysis.i_satd_pcm, i_type, I_PCM );
+            }
 
             h->mb.i_type = i_type;
             h->mb.i_partition = i_partition;
