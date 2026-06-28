@@ -89,12 +89,14 @@ static x264_frame_t *frame_new( x264_t *h, int b_fdec )
     if( i_csp == X264_CSP_NV12 || i_csp == X264_CSP_NV16 )
     {
         luma_plane_count = 1;
-        frame->i_plane = 2;
-        for( int i = 0; i < 2; i++ )
+        frame->i_plane = h->param.i_mobiclip ? 3 : 2;
+        for( int i = 0; i < frame->i_plane; i++ )
         {
-            frame->i_width[i] = i_width >> i;
-            frame->i_lines[i] = i_lines >> (i && i_csp == X264_CSP_NV12);
-            frame->i_stride[i] = i_stride;
+            frame->i_width[i] = i_width >> (i && (i_csp == X264_CSP_NV12 || h->param.i_mobiclip));
+            frame->i_lines[i] = i_lines >> (i && (i_csp == X264_CSP_NV12 || h->param.i_mobiclip));
+            frame->i_stride[i] = h->param.i_mobiclip && i
+                ? (i_stride >> 1)
+                : i_stride;
         }
     }
     else if( i_csp == X264_CSP_I444 )
@@ -154,6 +156,12 @@ static x264_frame_t *frame_new( x264_t *h, int b_fdec )
         PREALLOC( frame->buffer[1], chroma_plane_size * SIZEOF_PIXEL );
         if( PARAM_INTERLACED )
             PREALLOC( frame->buffer_fld[1], chroma_plane_size * SIZEOF_PIXEL );
+        if( h->param.i_mobiclip )
+        {
+            PREALLOC( frame->buffer[2], chroma_plane_size * SIZEOF_PIXEL );
+            if( PARAM_INTERLACED )
+                PREALLOC( frame->buffer_fld[2], chroma_plane_size * SIZEOF_PIXEL );
+        }
     }
 
     /* all 4 luma planes allocated together, since the cacheline split code
@@ -240,6 +248,12 @@ static x264_frame_t *frame_new( x264_t *h, int b_fdec )
         frame->plane[1] = frame->buffer[1] + frame->i_stride[1] * chroma_padv + PADH_ALIGN;
         if( PARAM_INTERLACED )
             frame->plane_fld[1] = frame->buffer_fld[1] + frame->i_stride[1] * chroma_padv + PADH_ALIGN;
+        if( h->param.i_mobiclip )
+        {
+            frame->plane[2] = frame->buffer[2] + frame->i_stride[2] * chroma_padv + PADH_ALIGN;
+            if( PARAM_INTERLACED )
+                frame->plane_fld[2] = frame->buffer_fld[2] + frame->i_stride[2] * chroma_padv + PADH_ALIGN;
+        }
     }
 
     for( int p = 0; p < luma_plane_count; p++ )
@@ -462,10 +476,20 @@ int x264_frame_copy_picture( x264_t *h, x264_frame_t *dst, x264_picture_t *src )
             int uv_swap = i_csp == X264_CSP_YV12 || i_csp == X264_CSP_YV16;
             get_plane_ptr( h, src, &pix[1], &stride[1], uv_swap ? 2 : 1, 1, v_shift );
             get_plane_ptr( h, src, &pix[2], &stride[2], uv_swap ? 1 : 2, 1, v_shift );
-            h->mc.plane_copy_interleave( dst->plane[1], dst->i_stride[1],
-                                         (pixel*)pix[1], stride[1]/SIZEOF_PIXEL,
-                                         (pixel*)pix[2], stride[2]/SIZEOF_PIXEL,
-                                         h->param.i_width>>1, h->param.i_height>>v_shift );
+            if( h->param.i_mobiclip )
+            {
+                h->mc.plane_copy( dst->plane[1], dst->i_stride[1], (pixel*)pix[1],
+                                  stride[1]/SIZEOF_PIXEL, h->param.i_width>>1, h->param.i_height>>v_shift );
+                h->mc.plane_copy( dst->plane[2], dst->i_stride[2], (pixel*)pix[2],
+                                  stride[2]/SIZEOF_PIXEL, h->param.i_width>>1, h->param.i_height>>v_shift );
+            }
+            else
+            {
+                h->mc.plane_copy_interleave( dst->plane[1], dst->i_stride[1],
+                                             (pixel*)pix[1], stride[1]/SIZEOF_PIXEL,
+                                             (pixel*)pix[2], stride[2]/SIZEOF_PIXEL,
+                                             h->param.i_width>>1, h->param.i_height>>v_shift );
+            }
         }
         else if( i_csp == X264_CSP_I444 || i_csp == X264_CSP_YV24 )
         {
@@ -567,6 +591,16 @@ void x264_frame_expand_border( x264_t *h, x264_frame_t *frame, int mb_y )
         int v_shift = i && CHROMA_V_SHIFT;
         int stride = frame->i_stride[i];
         int width = 16*h->mb.i_mb_width;
+        /* Mobiclip chroma planes are PLANAR (separate U/V), not interleaved
+         * NV12.  Expand them as a half-width single-sample plane (b_chroma=0),
+         * otherwise the right-edge border is written at the luma width — past
+         * the real chroma data — leaving the chroma reference un-padded and
+         * corrupting inter prediction near MB edges (cumulative P-frame drift). */
+        if( h->param.i_mobiclip && i )
+        {
+            width >>= CHROMA_H_SHIFT;
+            h_shift = 0;
+        }
         int height = (pad_bot ? 16*(h->mb.i_mb_height - mb_y) >> SLICE_MBAFF : 16) >> v_shift;
         int padh = PADH;
         int padv = PADV >> v_shift;

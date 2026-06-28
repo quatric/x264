@@ -28,6 +28,16 @@
 #ifndef X264_OSDEP_H
 #define X264_OSDEP_H
 
+#ifndef BOOL
+typedef int BOOL;
+#endif
+#ifndef FALSE
+#define FALSE 0
+#endif
+#ifndef TRUE
+#define TRUE 1
+#endif
+
 #define _LARGEFILE_SOURCE 1
 #define _FILE_OFFSET_BITS 64
 #include <stdio.h>

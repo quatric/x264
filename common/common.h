@@ -760,6 +760,15 @@ struct x264_t
 #if HAVE_OPENCL
     x264_opencl_t opencl;
 #endif
+    /* Mobiclip encoder state (only used when param.i_mobiclip != 0) */
+    int i_mobi_old_qp;
+    uint8_t mobi_pre[32];
+    /* Mirror of the Mobiclip decoder's motion[] array, used to compute the
+     * exact mid_pred() MV predictor the decoder uses.  Indexed by MB column:
+     * the predictor for column c is mid_pred(mv[c+1], mv[c+2], mv[c+3]) and
+     * the resulting MV is stored back at index c+2.  Half-pel units. */
+    int16_t mobi_motion_x[260];
+    int16_t mobi_motion_y[260];
 };
 
 typedef struct

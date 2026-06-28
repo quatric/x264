@@ -571,9 +571,13 @@ static ALWAYS_INLINE void macroblock_load_pic_pointers( x264_t *h, int mb_x, int
     int height = b_chroma ? 16 >> CHROMA_V_SHIFT : 16;
     int i_stride = h->fdec->i_stride[i];
     int i_stride2 = i_stride << mb_interlaced;
+    /* Mobiclip uses planar (non-interleaved) chroma, so each chroma MB is 8
+     * pixels wide rather than the 16-byte interleaved UV stride x264 normally
+     * assumes. */
+    int mb_x_step = (h->param.i_mobiclip && b_chroma) ? 8 : 16;
     int i_pix_offset = mb_interlaced
-                     ? 16 * mb_x + height * (mb_y&~1) * i_stride + (mb_y&1) * i_stride
-                     : 16 * mb_x + height * mb_y * i_stride;
+                     ? mb_x_step * mb_x + height * (mb_y&~1) * i_stride + (mb_y&1) * i_stride
+                     : mb_x_step * mb_x + height * mb_y * i_stride;
     pixel *plane_fdec = &h->fdec->plane[i][i_pix_offset];
     int fdec_idx = b_mbaff ? (mb_interlaced ? (3 + (mb_y&1)) : (mb_y&1) ? 2 : 4) : !(mb_y&1);
     pixel *intra_fdec = &h->intra_border_backup[fdec_idx][i][mb_x*16];
@@ -585,7 +589,15 @@ static ALWAYS_INLINE void macroblock_load_pic_pointers( x264_t *h, int mb_x, int
     h->mb.pic.p_fenc_plane[i] = &h->fenc->plane[i][i_pix_offset];
     if( b_chroma )
     {
-        h->mc.load_deinterleave_chroma_fenc( h->mb.pic.p_fenc[1], h->mb.pic.p_fenc_plane[1], i_stride2, height );
+        if( h->param.i_mobiclip )
+        {
+            /* Planar chroma: U and V live in separate planes, copy each. */
+            h->mb.pic.p_fenc_plane[2] = &h->fenc->plane[2][i_pix_offset];
+            h->mc.copy[PIXEL_8x8]( h->mb.pic.p_fenc[1], FENC_STRIDE, h->mb.pic.p_fenc_plane[1], i_stride2, height );
+            h->mc.copy[PIXEL_8x8]( h->mb.pic.p_fenc[2], FENC_STRIDE, h->mb.pic.p_fenc_plane[2], i_stride2, height );
+        }
+        else
+            h->mc.load_deinterleave_chroma_fenc( h->mb.pic.p_fenc[1], h->mb.pic.p_fenc_plane[1], i_stride2, height );
         memcpy( h->mb.pic.p_fdec[1]-FDEC_STRIDE, intra_fdec, 8*SIZEOF_PIXEL );
         memcpy( h->mb.pic.p_fdec[2]-FDEC_STRIDE, intra_fdec+8, 8*SIZEOF_PIXEL );
         h->mb.pic.p_fdec[1][-FDEC_STRIDE-1] = intra_fdec[-1-8];
@@ -624,6 +636,16 @@ static ALWAYS_INLINE void macroblock_load_pic_pointers( x264_t *h, int mb_x, int
         }
         h->mb.pic.p_fref[0][j][i*4] = plane_src + ref_pix_offset[j&1];
 
+        if( b_chroma && h->param.i_mobiclip )
+        {
+            pixel *plane_src2;
+            if( mb_interlaced )
+                plane_src2 = h->fref[0][j>>1]->plane_fld[2];
+            else
+                plane_src2 = h->fref[0][j]->plane[2];
+            h->mb.pic.p_fref[0][j][8] = plane_src2 + ref_pix_offset[j&1];
+        }
+
         if( !b_chroma )
         {
             if( h->param.analyse.i_subpel_refine )
@@ -652,6 +674,16 @@ static ALWAYS_INLINE void macroblock_load_pic_pointers( x264_t *h, int mb_x, int
                 filtered_src = h->fref[1][j]->filtered[i];
             }
             h->mb.pic.p_fref[1][j][i*4] = plane_src + ref_pix_offset[j&1];
+
+            if( b_chroma && h->param.i_mobiclip )
+            {
+                pixel *plane_src2;
+                if( mb_interlaced )
+                    plane_src2 = h->fref[1][j>>1]->plane_fld[2];
+                else
+                    plane_src2 = h->fref[1][j]->plane[2];
+                h->mb.pic.p_fref[1][j][8] = plane_src2 + ref_pix_offset[j&1];
+            }
 
             if( !b_chroma && h->param.analyse.i_subpel_refine )
                 for( int k = 1; k < 4; k++ )
@@ -1626,11 +1658,21 @@ static ALWAYS_INLINE void macroblock_store_pic( x264_t *h, int mb_x, int mb_y, i
     int height = b_chroma ? 16>>CHROMA_V_SHIFT : 16;
     int i_stride = h->fdec->i_stride[i];
     int i_stride2 = i_stride << (b_mbaff && MB_INTERLACED);
+    /* Mobiclip stores chroma planar (8-wide MBs), not interleaved. */
+    int mb_x_step = (h->param.i_mobiclip && b_chroma) ? 8 : 16;
     int i_pix_offset = (b_mbaff && MB_INTERLACED)
-                     ? 16 * mb_x + height * (mb_y&~1) * i_stride + (mb_y&1) * i_stride
-                     : 16 * mb_x + height * mb_y * i_stride;
+                     ? mb_x_step * mb_x + height * (mb_y&~1) * i_stride + (mb_y&1) * i_stride
+                     : mb_x_step * mb_x + height * mb_y * i_stride;
     if( b_chroma )
-        h->mc.store_interleave_chroma( &h->fdec->plane[1][i_pix_offset], i_stride2, h->mb.pic.p_fdec[1], h->mb.pic.p_fdec[2], height );
+    {
+        if( h->param.i_mobiclip )
+        {
+            h->mc.copy[PIXEL_8x8]( &h->fdec->plane[1][i_pix_offset], i_stride2, h->mb.pic.p_fdec[1], FDEC_STRIDE, height );
+            h->mc.copy[PIXEL_8x8]( &h->fdec->plane[2][i_pix_offset], i_stride2, h->mb.pic.p_fdec[2], FDEC_STRIDE, height );
+        }
+        else
+            h->mc.store_interleave_chroma( &h->fdec->plane[1][i_pix_offset], i_stride2, h->mb.pic.p_fdec[1], h->mb.pic.p_fdec[2], height );
+    }
     else
         h->mc.copy[PIXEL_16x16]( &h->fdec->plane[i][i_pix_offset], i_stride2, h->mb.pic.p_fdec[i], FDEC_STRIDE, 16 );
 }
