@@ -484,6 +484,9 @@ REALIGN_STACK void x264_param_default( x264_param_t *param )
     param->psz_clbin_file = NULL;
     param->i_avcintra_class = 0;
     param->i_avcintra_flavor = X264_AVCINTRA_FLAVOR_PANASONIC;
+    param->i_mobiclip = 0;
+    param->i_mobi_qyx = -1;
+    param->b_moflex = 0;
 }
 
 static int param_apply_preset( x264_param_t *param, const char *preset )
@@ -993,6 +996,12 @@ REALIGN_STACK int x264_param_parse( x264_param_t *p, const char *name, const cha
         p->i_avcintra_class = atoi(value);
     OPT("avcintra-flavor")
         b_error |= parse_enum( value, x264_avcintra_flavor_names, &p->i_avcintra_flavor );
+    OPT("mobiclip")
+        p->i_mobiclip = atoi(value);
+    OPT("mobi_qyx")
+        p->i_mobi_qyx = atoi(value);
+    OPT("moflex")
+        p->b_moflex = atobool(value);
     OPT("sar")
     {
         b_error |= ( 2 != sscanf( value, "%d:%d", &p->vui.i_sar_width, &p->vui.i_sar_height ) &&
