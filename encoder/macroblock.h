@@ -160,6 +160,16 @@ static ALWAYS_INLINE void mobi_add8x8_idct8( pixel *p_dst, int *mat )
             p_dst[y*FDEC_STRIDE+x] = x264_clip_pixel( p_dst[y*FDEC_STRIDE+x] + (mat[y*8+x] >> 6) );
     }
 }
+/* Whether this macroblock's luma residual is coded 8x8.  The coefficient
+ * writer gates on x264_mb_transform_8x8_allowed() as well as b_transform_8x8
+ * -- a P_8x8 macroblock with sub-8x8 partitions is not allowed 8x8 even when
+ * the transform decision picked it -- so the encode side must use exactly the
+ * same predicate or it reconstructs one way and writes the other. */
+static ALWAYS_INLINE int mobi_use_8x8( x264_t *h )
+{
+    return h->mb.b_transform_8x8 && x264_mb_transform_8x8_allowed( h );
+}
+
 /* Scan an 8x8 coefficient block into coded order.
  *
  * The Mobiclip decoder scans 8x8 blocks with ff_zigzag_direct, which is

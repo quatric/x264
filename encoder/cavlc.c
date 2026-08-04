@@ -1212,7 +1212,7 @@ static void encode_p_block(x264_t *h)
 #if !RDO_SKIP_BS
 		tmp = bs_pos(s);
 #endif
-		BOOL use8x8 = x264_mb_transform_8x8_allowed(h) && h->mb.b_transform_8x8;
+		BOOL use8x8 = mobi_use_8x8(h);
 		uint8_t mask =
 			(!!h->mb.cache.non_zero_count[x264_scan8[0 * 4]]) |
 			((!!h->mb.cache.non_zero_count[x264_scan8[1 * 4]]) << 1) |
@@ -1382,17 +1382,29 @@ void x264_macroblock_write_cavlc( x264_t *h )
     }*/
 #endif
 	if (h->param.i_mobiclip) {
+		/* Under RDO this runs as a trial encode purely to count bits, so every
+		 * piece of encoder state it touches has to be put back.  The
+		 * coefficient writer assigns encode_dct()'s return to non_zero_count,
+		 * and the intra-mode writer advances mobi_pre; leaving either mutated
+		 * corrupts the real encode of this macroblock and the neighbour
+		 * context of the next one, which shows up as a handful of macroblocks
+		 * whose reconstruction the decoder cannot reproduce. */
 		uint8_t mobi_pre_backup[32];
-		if (RDO_SKIP_BS)
+		ALIGNED_8( uint8_t nnz_backup[X264_SCAN8_SIZE] );
+		if (RDO_SKIP_BS) {
 			memcpy(mobi_pre_backup, h->mobi_pre, sizeof(h->mobi_pre));
+			memcpy(nnz_backup, h->mb.cache.non_zero_count, sizeof(nnz_backup));
+		}
 
 		if (h->sh.i_type == SLICE_TYPE_P)
 			encode_p_block(h);
 		else //if (h->sh.i_type == SLICE_TYPE_I)
 			encode_i_block(h);
 
-		if (RDO_SKIP_BS)
+		if (RDO_SKIP_BS) {
 			memcpy(h->mobi_pre, mobi_pre_backup, sizeof(h->mobi_pre));
+			memcpy(h->mb.cache.non_zero_count, nnz_backup, sizeof(nnz_backup));
+		}
 	} else {
 		/* Standard H.264 CAVLC macroblock write path */
 		if( h->sh.i_type == SLICE_TYPE_P )
