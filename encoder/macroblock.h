@@ -29,8 +29,23 @@
 
 #include "common/macroblock.h"
 
-/* Mobiclip quantization tables — used by custom quantizer to match decoder.
- * quant4x4_tab/q8 match the decoder's dequant tables exactly. */
+/* ---------------------------------------------------------------------------
+ * Mobiclip transform / quantization.
+ *
+ * Ported from Helwettpackardenterprise's Codex-assisted translation of the
+ * retail Mobiclip VfW encoder (MODS_Encoder_v43_2), which establishes that
+ * Mobiclip's transform and quantizer are plain H.264:
+ *
+ *   forward   level = sign(c) * ((|c| * MF[q%6][pos] + f) >> shift)
+ *             shift = 15 + q/6 (4x4) or 16 + q/6 (8x8),  f = (1 << shift) / 3
+ *   inverse   coef  = level * (DQ[q%6][pos] << (q/6))       (4x4)
+ *             coef  = level * (DQ[q%6][pos] << (q/6 - 2))   (8x8)
+ *
+ * MF/DQ are the standard H.264 scale matrices; the single 1/3 rounding bias is
+ * used for both intra and inter (the reference encoder stores exactly one
+ * offset in its quant struct).  q is the quantizer carried in the bitstream,
+ * not x264's internal QP -- see mobi_qp().
+ * ------------------------------------------------------------------------- */
 static const uint8_t mobi_zigzag4x4[16] =
     { 0, 4, 1, 2, 5, 8, 12, 9, 6, 3, 7, 10, 13, 14, 11, 15 };
 static const uint8_t mobi_zigzag8x8[64] =
@@ -38,115 +53,235 @@ static const uint8_t mobi_zigzag8x8[64] =
      12, 19, 26, 33, 40, 48, 41, 34, 27, 20, 13, 6, 7, 14, 21, 28,
      35, 42, 49, 56, 57, 50, 43, 36, 29, 22, 15, 23, 30, 37, 44, 51,
      58, 59, 52, 45, 38, 31, 39, 46, 53, 60, 61, 54, 47, 55, 62, 63 };
-static const uint8_t mobi_q4[6][16] = {
-    {10,13,13,10,16,10,13,13,13,13,16,10,16,13,13,16},
-    {11,14,14,11,18,11,14,14,14,14,18,11,18,14,14,18},
-    {13,16,16,13,20,13,16,16,16,16,20,13,20,16,16,20},
-    {14,18,18,14,23,14,18,18,18,18,23,14,23,18,18,23},
-    {16,20,20,16,25,16,20,20,20,20,25,16,25,20,20,25},
-    {18,23,23,18,29,18,23,23,23,23,29,18,29,23,23,29},
+
+/* Position -> scale-table column, raster order. */
+static const uint8_t mobi_scale_idx4[16] =
+    { 0,2,0,2,  2,1,2,1,  0,2,0,2,  2,1,2,1 };
+static const uint8_t mobi_scale_idx8[64] = {
+    0,3,4,3,0,3,4,3,  3,1,5,1,3,1,5,1,  4,5,2,5,4,5,2,5,  3,1,5,1,3,1,5,1,
+    0,3,4,3,0,3,4,3,  3,1,5,1,3,1,5,1,  4,5,2,5,4,5,2,5,  3,1,5,1,3,1,5,1 };
+
+static const uint16_t mobi_quant4_scale[6][3] = {
+    { 13107, 5243, 8066 }, { 11916, 4660, 7490 }, { 10082, 4194, 6554 },
+    {  9362, 3647, 5825 }, {  8192, 3355, 5243 }, {  7282, 2893, 4559 },
 };
-static const uint8_t mobi_q8[6][64] = {
-    {0x14,0x13,0x13,0x19,0x12,0x19,0x13,0x18,0x18,0x13,0x14,0x12,0x20,0x12,0x14,0x13,0x13,0x18,0x18,0x13,0x13,0x19,0x12,0x19,0x12,0x19,0x12,0x19,0x13,0x18,0x18,0x13,0x13,0x18,0x18,0x13,0x12,0x20,0x12,0x14,0x12,0x20,0x12,0x18,0x18,0x13,0x13,0x18,0x18,0x12,0x19,0x12,0x19,0x12,0x13,0x18,0x18,0x13,0x12,0x20,0x12,0x18,0x18,0x12},
-    {0x16,0x15,0x15,0x1C,0x13,0x1C,0x15,0x1A,0x1A,0x15,0x16,0x13,0x23,0x13,0x16,0x15,0x15,0x1A,0x1A,0x15,0x15,0x1C,0x13,0x1C,0x13,0x1C,0x13,0x1C,0x15,0x1A,0x1A,0x15,0x15,0x1A,0x1A,0x15,0x13,0x23,0x13,0x16,0x13,0x23,0x13,0x1A,0x1A,0x15,0x15,0x1A,0x1A,0x13,0x1C,0x13,0x1C,0x13,0x15,0x1A,0x1A,0x15,0x13,0x23,0x13,0x1A,0x1A,0x13},
-    {0x1A,0x18,0x18,0x21,0x17,0x21,0x18,0x1F,0x1F,0x18,0x1A,0x17,0x2A,0x17,0x1A,0x18,0x18,0x1F,0x1F,0x18,0x18,0x21,0x17,0x21,0x17,0x21,0x17,0x21,0x18,0x1F,0x1F,0x18,0x18,0x1F,0x1F,0x18,0x17,0x2A,0x17,0x1A,0x17,0x2A,0x17,0x1F,0x1F,0x18,0x18,0x1F,0x1F,0x17,0x21,0x17,0x21,0x17,0x18,0x1F,0x1F,0x18,0x17,0x2A,0x17,0x1F,0x1F,0x17},
-    {0x1C,0x1A,0x1A,0x23,0x19,0x23,0x1A,0x21,0x21,0x1A,0x1C,0x19,0x2D,0x19,0x1C,0x1A,0x1A,0x21,0x21,0x1A,0x1A,0x23,0x19,0x23,0x19,0x23,0x19,0x23,0x1A,0x21,0x21,0x1A,0x1A,0x21,0x21,0x1A,0x19,0x2D,0x19,0x1C,0x19,0x2D,0x19,0x21,0x21,0x1A,0x1A,0x21,0x21,0x19,0x23,0x19,0x23,0x19,0x1A,0x21,0x21,0x1A,0x19,0x2D,0x19,0x21,0x21,0x19},
-    {0x20,0x1E,0x1E,0x28,0x1C,0x28,0x1E,0x26,0x26,0x1E,0x20,0x1C,0x33,0x1C,0x20,0x1E,0x1E,0x26,0x26,0x1E,0x1E,0x28,0x1C,0x28,0x1C,0x28,0x1C,0x28,0x1E,0x26,0x26,0x1E,0x1E,0x26,0x26,0x1E,0x1C,0x33,0x1C,0x20,0x1C,0x33,0x1C,0x26,0x26,0x1E,0x1E,0x26,0x26,0x1C,0x28,0x1C,0x28,0x1C,0x1E,0x26,0x26,0x1E,0x1C,0x33,0x1C,0x26,0x26,0x1C},
-    {0x24,0x22,0x22,0x2E,0x20,0x2E,0x22,0x2B,0x2B,0x22,0x24,0x20,0x3A,0x20,0x24,0x22,0x22,0x2B,0x2B,0x22,0x22,0x2E,0x20,0x2E,0x20,0x2E,0x20,0x2E,0x22,0x2B,0x2B,0x22,0x22,0x2B,0x2B,0x22,0x20,0x3A,0x20,0x24,0x20,0x3A,0x20,0x2B,0x2B,0x22,0x22,0x2B,0x2B,0x20,0x2E,0x20,0x2E,0x20,0x22,0x2B,0x2B,0x22,0x20,0x3A,0x20,0x2B,0x2B,0x20},
+static const uint8_t mobi_dequant4_scale[6][3] = {
+    { 10, 16, 13 }, { 11, 18, 14 }, { 13, 20, 16 },
+    { 14, 23, 18 }, { 16, 25, 20 }, { 18, 29, 23 },
 };
-static const uint8_t mobi_q8_chroma[6][64] = {
-    {0x14,0x13,0x13,0x19,0x12,0x19,0x13,0x18,0x18,0x13,0x14,0x12,0x20,0x12,0x14,0x13,0x13,0x18,0x18,0x13,0x13,0x19,0x12,0x19,0x12,0x19,0x12,0x19,0x13,0x18,0x18,0x13,0x13,0x18,0x18,0x13,0x12,0x20,0x12,0x14,0x12,0x20,0x12,0x18,0x18,0x13,0x13,0x18,0x18,0x12,0x19,0x12,0x19,0x12,0x13,0x18,0x18,0x13,0x12,0x20,0x12,0x18,0x18,0x12},
-    {0x16,0x15,0x15,0x1C,0x13,0x1C,0x15,0x1A,0x1A,0x15,0x16,0x13,0x23,0x13,0x16,0x15,0x15,0x1A,0x1A,0x15,0x15,0x1C,0x13,0x1C,0x13,0x1C,0x13,0x1C,0x15,0x1A,0x1A,0x15,0x15,0x1A,0x1A,0x15,0x13,0x23,0x13,0x16,0x13,0x23,0x13,0x1A,0x1A,0x15,0x15,0x1A,0x1A,0x13,0x1C,0x13,0x1C,0x13,0x15,0x1A,0x1A,0x15,0x13,0x23,0x13,0x1A,0x1A,0x13},
-    {0x1A,0x18,0x18,0x21,0x17,0x21,0x18,0x1F,0x1F,0x18,0x1A,0x17,0x2A,0x17,0x1A,0x18,0x18,0x1F,0x1F,0x18,0x18,0x21,0x17,0x21,0x17,0x21,0x17,0x21,0x18,0x1F,0x1F,0x18,0x18,0x1F,0x1F,0x18,0x17,0x2A,0x17,0x1A,0x17,0x2A,0x17,0x1F,0x1F,0x18,0x18,0x1F,0x1F,0x17,0x21,0x17,0x21,0x17,0x18,0x1F,0x1F,0x18,0x17,0x2A,0x17,0x1F,0x1F,0x17},
-    {0x1C,0x1A,0x1A,0x23,0x19,0x23,0x1A,0x21,0x21,0x1A,0x1C,0x19,0x2D,0x19,0x1C,0x1A,0x1A,0x21,0x21,0x1A,0x1A,0x23,0x19,0x23,0x19,0x23,0x19,0x23,0x1A,0x21,0x21,0x1A,0x1A,0x21,0x21,0x1A,0x19,0x2D,0x19,0x1C,0x19,0x2D,0x19,0x21,0x21,0x1A,0x1A,0x21,0x21,0x19,0x23,0x19,0x23,0x19,0x1A,0x21,0x21,0x1A,0x19,0x2D,0x19,0x21,0x21,0x19},
-    {0x20,0x1E,0x1E,0x28,0x1C,0x28,0x1E,0x26,0x26,0x1E,0x20,0x1C,0x33,0x1C,0x20,0x1E,0x1E,0x26,0x26,0x1E,0x1E,0x28,0x1C,0x28,0x1C,0x28,0x1C,0x28,0x1E,0x26,0x26,0x1E,0x1E,0x26,0x26,0x1E,0x1C,0x33,0x1C,0x20,0x1C,0x33,0x1C,0x26,0x26,0x1E,0x1E,0x26,0x26,0x1C,0x28,0x1C,0x28,0x1C,0x1E,0x26,0x26,0x1E,0x1C,0x33,0x1C,0x26,0x26,0x1C},
-    {0x24,0x22,0x22,0x2E,0x20,0x2E,0x22,0x2B,0x2B,0x22,0x24,0x20,0x3A,0x20,0x24,0x22,0x22,0x2B,0x2B,0x22,0x22,0x2E,0x20,0x2E,0x20,0x2E,0x20,0x2E,0x22,0x2B,0x2B,0x22,0x22,0x2B,0x2B,0x22,0x20,0x3A,0x20,0x24,0x20,0x3A,0x20,0x2B,0x2B,0x22,0x22,0x2B,0x2B,0x20,0x2E,0x20,0x2E,0x20,0x22,0x2B,0x2B,0x22,0x20,0x3A,0x20,0x2B,0x2B,0x20},
+static const uint16_t mobi_quant8_scale[6][6] = {
+    { 13107, 11428, 20972, 12222, 16777, 15481 },
+    { 11916, 10826, 19174, 11058, 14980, 14290 },
+    { 10082,  8943, 15978,  9675, 12710, 11985 },
+    {  9362,  8228, 14913,  8931, 11984, 11259 },
+    {  8192,  7346, 13159,  7740, 10486,  9777 },
+    {  7282,  6428, 11570,  6830,  9118,  8640 },
+};
+static const uint8_t mobi_dequant8_scale[6][6] = {
+    { 20, 18, 32, 19, 25, 24 }, { 22, 19, 35, 21, 28, 26 },
+    { 26, 23, 42, 24, 33, 31 }, { 28, 25, 45, 26, 35, 33 },
+    { 32, 28, 51, 30, 40, 38 }, { 36, 32, 58, 34, 46, 43 },
 };
 
-/* Mobiclip-aware quantizer: rounds to nearest, matching decoder's dequant.
- * The decoder does: mat[ztab[pos]] = level * (quant_tab[qx][pos] << qy)
- * So quantizer step = quant_tab[qx][pos] << qy. */
-/* Extra quantizer coarseness for Mobiclip: total qy = 2 + MOBI_QYX.  qy=2
- * (MOBI_QYX=0) is the finest tier and exactly reproduces the original
- * bit-exact behaviour.  Higher values coarsen the quantization (smaller
- * files, lower quality) and are applied identically to the forward quant,
- * the reconstruction, and the header quantizer so enc/dec stay bit-exact.
- * The DEFAULT is 1: combined with the inter deadzone (see mobi_round_off)
- * this keeps temporal flicker near source level at a size comparable to
- * coarser settings.  Raise MOBI_QYX for smaller files (more flicker) or set
- * MOBI_QYX=0 for visually-lossless/bit-exact. */
-static ALWAYS_INLINE int mobi_qyx( x264_t *h )
+/* The quantizer actually carried in the bitstream.  The I-frame header field is
+ * 6 bits and the decoder rejects anything below 12 (setup_qtables), so the
+ * usable range is [12,63]; it is an H.264 QP, so x264's own QP maps straight
+ * through.  i_mobi_qyx survives as an additive coarseness offset in whole
+ * qy tiers (it used to be the *only* way to change quantization, because the
+ * header wrote (qp%6)+12 and threw away qp/6). */
+static ALWAYS_INLINE int mobi_qp( x264_t *h, int i_qp )
 {
-    int v = h->param.i_mobi_qyx;
-    if( v == -1 ) { const char *e = getenv("MOBI_QYX"); v = e ? atoi(e) : 1; if( v < 0 ) v = 0; }
-    return v;
-}
-/* Rounding offset for quantization.  level = (coef + off)/step, so the
- * threshold to reach level 1 is (step - off).  Round-to-nearest uses off =
- * step/2 (threshold step/2).  For INTER residual we instead use a deadzone
- * (smaller off -> higher threshold) so the small, noisy coefficients of
- * near-static blocks round to zero *consistently* every frame instead of
- * flipping between 0 and +/-1 -> kills temporal flicker/jitter and shrinks
- * files.  This is purely an encoder decision: the decoder reconstructs
- * level*step regardless, so it stays fully bit-compatible.
- *   MOBI_DZ in [1..8] scales the inter offset as step*MOBI_DZ/16
- *   (8 = round-to-nearest/no deadzone, default 5 ~= threshold 0.69*step). */
-static ALWAYS_INLINE int mobi_round_off( x264_t *h, int step, int b_intra )
-{
-    if( b_intra )
-        return step >> 1;
-    static int dz = -1;
-    if( dz < 0 ) { const char *e = getenv("MOBI_DZ"); dz = e ? atoi(e) : 5; if( dz < 1 ) dz = 1; if( dz > 8 ) dz = 8; }
-    return step * dz / 16;
+    int extra = h->param.i_mobi_qyx;
+    if( extra < 0 ) { const char *e = getenv("MOBI_QYX"); extra = e ? atoi(e) : 0; if( extra < 0 ) extra = 0; }
+    return x264_clip3( i_qp + 6 * extra, 12, 63 );
 }
 
-static ALWAYS_INLINE int mobi_quant_4x4( x264_t *h, dctcoef dct[16], int qp, int b_intra )
+static ALWAYS_INLINE int mobi_dq4( int q, int raster )
 {
-    int qx = qp % 6;
-    int shift = mobi_qyx( h );
-    int nz = 0;
-    for( int zz = 0; zz < 16; zz++ )
+    return (int)mobi_dequant4_scale[q%6][mobi_scale_idx4[raster]] << (q/6);
+}
+static ALWAYS_INLINE int mobi_dq8( int q, int raster )
+{
+    return (int)mobi_dequant8_scale[q%6][mobi_scale_idx8[raster]] << (q/6 - 2);
+}
+
+/* Decoder-exact inverse transforms (mobiclip.c inverse4()/idct()).  Used for
+ * chroma 8x8 reconstruction so the encoder's reference matches the decoder
+ * bit-for-bit (x264's add8x8_idct8 has different normalisation/rounding, which
+ * accumulates as chroma drift across P-frames).  Defined outside the
+ * !HIGH_BIT_DEPTH guard because mb_encode_chroma_internal compiles for both
+ * bit depths (the mobiclip path is dead code at high bit depth but must link). */
+static ALWAYS_INLINE void mobi_inverse4( int *rs )
+{
+    unsigned a = (unsigned)rs[0] + rs[2];
+    unsigned b = (unsigned)rs[0] - rs[2];
+    unsigned c = (unsigned)rs[1] + (rs[3] >> 1);
+    unsigned d = (rs[1] >> 1) - (unsigned)rs[3];
+    rs[0] = a + c;
+    rs[1] = b + d;
+    rs[2] = b - d;
+    rs[3] = a - c;
+}
+static ALWAYS_INLINE void mobi_idct8_1d( int *arr )
+{
+    int e, f, g, h;
+    unsigned x0, x1, x2, x3;
+    int tmp[4];
+    tmp[0] = arr[0]; tmp[1] = arr[2]; tmp[2] = arr[4]; tmp[3] = arr[6];
+    mobi_inverse4( tmp );
+    e = (unsigned)arr[7] + arr[1] - arr[3] - (arr[3] >> 1);
+    f = (unsigned)arr[7] - arr[1] + arr[5] + (arr[5] >> 1);
+    g = (unsigned)arr[5] - arr[3] - arr[7] - (arr[7] >> 1);
+    h = (unsigned)arr[5] + arr[3] + arr[1] + (arr[1] >> 1);
+    x3 = (unsigned)g + (h >> 2);
+    x2 = (unsigned)e + (f >> 2);
+    x1 = (e >> 2) - (unsigned)f;
+    x0 = (unsigned)h - (g >> 2);
+    arr[0] = tmp[0] + x0; arr[1] = tmp[1] + x1; arr[2] = tmp[2] + x2; arr[3] = tmp[3] + x3;
+    arr[4] = tmp[3] - x3; arr[5] = tmp[2] - x2; arr[6] = tmp[1] - x1; arr[7] = tmp[0] - x0;
+}
+/* mat[64] holds the dequantized coefficients in raster order; reconstruct and
+ * add to p_dst (FDEC_STRIDE) exactly as the decoder's add_coefficients() does. */
+static ALWAYS_INLINE void mobi_add8x8_idct8( pixel *p_dst, int *mat )
+{
+    mat[0] += 32;
+    for( int y = 0; y < 8; y++ )
+        mobi_idct8_1d( &mat[y*8] );
+    for( int y = 0; y < 8; y++ )
     {
-        int raster = mobi_zigzag4x4[zz];
-        /* x264's 2D 4x4 DCT DC coefficient = 16*R for constant residual R.
-         * The Mobiclip IDCT (>>6 after 2D butterfly) needs DC = 64*R to recover R.
-         * Using unshifted mobi_q4[qx] as step compensates: level = 16R/step,
-         * reconstruction = level * (step<<2) / 64 = 16R * 4 / 64 = R. */
-        int step = (int)mobi_q4[qx][zz] << shift;
-        int off  = mobi_round_off( h, step, b_intra );
-        int coef = dct[raster];
-        int level;
+        for( int x = y+1; x < 8; x++ )
+        {
+            int a = mat[x*8+y], b = mat[y*8+x];
+            mat[y*8+x] = a;
+            mat[x*8+y] = b;
+        }
+        mobi_idct8_1d( &mat[y*8] );
+        for( int x = 0; x < 8; x++ )
+            p_dst[y*FDEC_STRIDE+x] = x264_clip_pixel( p_dst[y*FDEC_STRIDE+x] + (mat[y*8+x] >> 6) );
+    }
+}
+/* Mobiclip's own forward transforms.  Structurally these are the H.264 integer
+ * DCTs, but the reference encoder keeps every intermediate in int16 and runs
+ * the 8x8 column pass *before* the row pass.  The >>1 / >>2 truncations make
+ * the 2D transform non-commutative, so both details change the coefficients;
+ * x264's dctf.sub*_dct do it the other way with wider intermediates. */
+static ALWAYS_INLINE void mobi_transform_8pt( int16_t *p, int stride )
+{
+    int16_t x0 = p[0*stride], x1 = p[1*stride], x2 = p[2*stride], x3 = p[3*stride];
+    int16_t x4 = p[4*stride], x5 = p[5*stride], x6 = p[6*stride], x7 = p[7*stride];
+
+    int16_t s0 = x0 + x7, s1 = x1 + x6, s2 = x2 + x5, s3 = x3 + x4;
+    int16_t d0 = x0 - x7, d1 = x1 - x6, d2 = x2 - x5, d3 = x3 - x4;
+
+    int16_t ee0 = s0 + s3, ee1 = s1 + s2;
+    int16_t eo0 = s0 - s3, eo1 = s1 - s2;
+
+    p[0*stride] = ee0 + ee1;
+    p[2*stride] = eo0 + (eo1 >> 1);
+    p[4*stride] = ee0 - ee1;
+    p[6*stride] = (eo0 >> 1) - eo1;
+
+    int16_t o0 = d0 + (d0 >> 1) + d1 + d2;
+    int16_t o1 = d0 - d2 - (d2 >> 1) - d3;
+    int16_t o2 = d0 + d3 - d1 - (d1 >> 1);
+    int16_t o3 = d1 - d2 + d3 + (d3 >> 1);
+
+    p[1*stride] = o0 + (o3 >> 2);
+    p[3*stride] = o1 + (o2 >> 2);
+    p[5*stride] = o2 - (o1 >> 2);
+    p[7*stride] = (o0 >> 2) - o3;
+}
+
+static ALWAYS_INLINE void mobi_sub8x8_dct8( dctcoef dst[64], pixel *p_src, pixel *p_dst )
+{
+    int16_t t[64];
+    for( int y = 0; y < 8; y++ )
+        for( int x = 0; x < 8; x++ )
+            t[y*8+x] = (int16_t)(p_src[y*FENC_STRIDE+x] - p_dst[y*FDEC_STRIDE+x]);
+    for( int x = 0; x < 8; x++ )
+        mobi_transform_8pt( &t[x], 8 );   /* columns first */
+    for( int y = 0; y < 8; y++ )
+        mobi_transform_8pt( &t[y*8], 1 ); /* then rows */
+    /* x264's sub8x8_dct8 writes its second pass transposed, and the rest of
+     * the mobiclip path (zigzag, coefficient writer, inverse transform) is
+     * built on that layout, so transpose to match. */
+    for( int y = 0; y < 8; y++ )
+        for( int x = 0; x < 8; x++ )
+            dst[x*8+y] = t[y*8+x];
+}
+
+static ALWAYS_INLINE void mobi_sub4x4_dct( dctcoef dst[16], pixel *p_src, pixel *p_dst )
+{
+    int16_t t[16];
+    for( int y = 0; y < 4; y++ )
+        for( int x = 0; x < 4; x++ )
+            t[y*4+x] = (int16_t)(p_src[y*FENC_STRIDE+x] - p_dst[y*FDEC_STRIDE+x]);
+    for( int x = 0; x < 4; x++ )   /* column pass */
+    {
+        int16_t a = t[0*4+x] + t[3*4+x], b = t[1*4+x] + t[2*4+x];
+        int16_t c = t[1*4+x] - t[2*4+x], d = t[0*4+x] - t[3*4+x];
+        t[0*4+x] = a + b;
+        t[1*4+x] = c + 2*d;
+        t[2*4+x] = a - b;
+        t[3*4+x] = d - 2*c;
+    }
+    for( int y = 0; y < 4; y++ )   /* row pass, transposed out (see above) */
+    {
+        int16_t a = t[y*4+0] + t[y*4+3], b = t[y*4+1] + t[y*4+2];
+        int16_t c = t[y*4+1] - t[y*4+2], d = t[y*4+0] - t[y*4+3];
+        dst[0*4+y] = a + b;
+        dst[1*4+y] = c + 2*d;
+        dst[2*4+y] = a - b;
+        dst[3*4+y] = d - 2*c;
+    }
+}
+
+/* b_intra is accepted for call-site symmetry but unused: the reference encoder
+ * uses the same (1<<shift)/3 bias for intra and inter blocks alike. */
+static ALWAYS_INLINE int mobi_quant_4x4( x264_t *h, dctcoef dct[16], int i_qp, int b_intra )
+{
+    int q = mobi_qp( h, i_qp );
+    int shift = 15 + q/6;
+    int f = (1 << shift) / 3;
+    const uint16_t *mf = mobi_quant4_scale[q%6];
+    int nz = 0;
+    (void)b_intra;
+    for( int i = 0; i < 16; i++ )
+    {
+        int coef = dct[i], level;
+        int m = mf[mobi_scale_idx4[i]];
         if( coef >= 0 )
-            level = (coef + off) / step;
+            level =  ( ( coef * m + f) >> shift);
         else
-            level = -((-coef + off) / step);
-        dct[raster] = level;
+            level = -( ((-coef) * m + f) >> shift);
+        dct[i] = level;
         nz |= level;
     }
     return !!nz;
 }
 
-static ALWAYS_INLINE int mobi_quant_8x8( x264_t *h, dctcoef dct[64], int qp, int b_intra )
+static ALWAYS_INLINE int mobi_quant_8x8( x264_t *h, dctcoef dct[64], int i_qp, int b_intra )
 {
-    int qx = qp % 6;
-    int shift = mobi_qyx( h );
+    int q = mobi_qp( h, i_qp );
+    int shift = 16 + q/6;
+    int f = (1 << shift) / 3;
+    const uint16_t *mf = mobi_quant8_scale[q%6];
     int nz = 0;
-    for( int zz = 0; zz < 64; zz++ )
+    (void)b_intra;
+    for( int i = 0; i < 64; i++ )
     {
-        int raster = mobi_zigzag8x8[zz];
-        int step = (int)mobi_q8[qx][zz] << shift;
-        int off  = mobi_round_off( h, step, b_intra );
-        int coef = dct[raster];
-        int level;
+        int coef = dct[i], level;
+        int m = mf[mobi_scale_idx8[i]];
         if( coef >= 0 )
-            level = (coef + off) / step;
+            level =  ( ( coef * m + f) >> shift);
         else
-            level = -((-coef + off) / step);
-        dct[raster] = level;
+            level = -( ((-coef) * m + f) >> shift);
+        dct[i] = level;
         nz |= level;
     }
     return !!nz;
 }
+
 
 #define x264_rdo_init x264_template(rdo_init)
 void x264_rdo_init( void );
@@ -584,7 +719,10 @@ static ALWAYS_INLINE void x264_mb_encode_i4x4( x264_t *h, int p, int idx, int i_
         return;
     }
 
-    h->dctf.sub4x4_dct( dct4x4, p_src, p_dst );
+    if( h->param.i_mobiclip )
+        mobi_sub4x4_dct( dct4x4, p_src, p_dst );
+    else
+        h->dctf.sub4x4_dct( dct4x4, p_src, p_dst );
 
     nz = x264_quant_4x4( h, dct4x4, i_qp, ctx_cat_plane[DCT_LUMA_4x4][p], 1, p, idx );
     h->mb.cache.non_zero_count[x264_scan8[p*16+idx]] = nz;
@@ -603,13 +741,11 @@ static ALWAYS_INLINE void x264_mb_encode_i4x4( x264_t *h, int p, int idx, int i_
             h->dct.luma4x4[p*16+idx][zz] = dct4x4[mobi_zigzag4x4[zz]];
         if( 1 ) /* mobi dequant always for matching mobiclip decoder */
         {
-            int qx = i_qp % 6;
+            int q = mobi_qp( h, i_qp );
             int qtab64[16];
-            /* Reconstruction uses << 2 (qy=2), matching the header QP = qx + 12.
-             * Forward quant used unshifted mobi_q4[qx], so level=16R/step.
-             * Here: level * (step<<2) >> 6 = 16R * 4 / 64 = R. */
-            for( int zz = 0; zz < 16; zz++ )
-                qtab64[mobi_zigzag4x4[zz]] = mobi_q4[qx][zz] << (2 + mobi_qyx(h));
+            /* Decoder-exact 4x4 dequant: level * (DQ[q%6][pos] << (q/6)). */
+            for( int i = 0; i < 16; i++ )
+                qtab64[i] = mobi_dq4( q, i );
             /* Dequantize into a 32-bit matrix: level*qtab (level up to ~hundreds,
              * qtab up to ~29<<2) overflows the int16 dct4x4 buffer, and the
              * inverse4 row/column sums overflow it further.  The decoder uses
@@ -738,7 +874,10 @@ static ALWAYS_INLINE void x264_mb_encode_i8x8( x264_t *h, int p, int idx, int i_
         return;
     }
 
-    h->dctf.sub8x8_dct8( dct8x8, p_src, p_dst );
+    if( h->param.i_mobiclip )
+        mobi_sub8x8_dct8( dct8x8, p_src, p_dst );
+    else
+        h->dctf.sub8x8_dct8( dct8x8, p_src, p_dst );
 
     nz = x264_quant_8x8( h, dct8x8, i_qp, ctx_cat_plane[DCT_LUMA_8x8][p], 1, p, idx );
     if( nz )
@@ -747,23 +886,24 @@ static ALWAYS_INLINE void x264_mb_encode_i8x8( x264_t *h, int p, int idx, int i_
 		for (int i = 0; i < 64; i++)
 			h->dct.luma8x8[p * 4 + idx][i] = dct8x8[ZigZagTable8x8[i]];
         //h->zigzagf.scan_8x8( h->dct.luma8x8[p*4+idx], dct8x8 );
-        if( 1 )
+        if( h->param.i_mobiclip )
         {
-            int qx = i_qp % 6;
-            /* 8x8 DCT DC = 64*R. Forward step = mobi_q8[qx] (unshifted, via
-             * mobi_quant_8x8 clamp). For r6=0 (qy=2): reconstruct = 64R/step * step/64 = R.
-             * r6 must match the decoder's qy=2 (header Q=(i_qp%6)+12). */
-            int qtab[64];
-            for( int zz = 0; zz < 64; zz++ )
-                qtab[ZigZagTable8x8[zz]] = mobi_q8[qx][zz];  /* r6=0 always */
+            /* Decoder-exact 8x8 dequant: level * (DQ[q%6][pos] << (q/6 - 2)).
+             * Dequantize into a 32-bit matrix and reconstruct with the
+             * decoder's own inverse transform -- level*step overflows the
+             * int16 dct8x8 buffer, and x264's add8x8_idct8 normalises
+             * differently, which accumulates as drift across P-frames. */
+            int q = mobi_qp( h, i_qp );
+            int mat[64];
             for( int i = 0; i < 64; i++ )
-                dct8x8[i] = dct8x8[i] * (unsigned)qtab[i];
+                mat[i] = (int)dct8x8[i] * mobi_dq8( q, i );
+            mobi_add8x8_idct8( p_dst, mat );
         }
         else
         {
             h->quantf.dequant_8x8( dct8x8, h->dequant8_mf[CQM_8IY], i_qp );
+            h->dctf.add8x8_idct8( p_dst, dct8x8 );
         }
-        h->dctf.add8x8_idct8( p_dst, dct8x8 );
         STORE_8x8_NNZ( p, idx, 1 );
     }
     else

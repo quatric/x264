@@ -195,12 +195,11 @@ static void slice_header_init( x264_t *h, x264_slice_header_t *sh,
 
     sh->i_cabac_init_idc = param->i_cabac_init_idc;
 
-    /* Mobiclip: clamp to [12, 161] range required by the decoder setup_qtables.
-     * i_qp is x264's internal QP; the decoder reads qx=Q%6, qy=Q/6 from the header
-     * and uses mobi qtab[qx]<<qy for reconstruction.  To ensure exact match between
-     * the encoder's internal reconstruction and the decoder's, the header must carry
-     * EXACTLY the same qx/qy as used in macroblock.h's mobi dequant. */
-    sh->i_qp = param->i_mobiclip ? x264_clip3(i_qp, 12, 161) : SPEC_QP(i_qp);
+    /* Mobiclip: the header carries an H.264 QP, so x264's internal QP passes
+     * straight through; mobi_qp() applies the [12,63] range the 6-bit header
+     * field and the decoder's setup_qtables() accept.  Encoder reconstruction
+     * derives qx/qy from the same mobi_qp(), so the two cannot drift apart. */
+    sh->i_qp = param->i_mobiclip ? x264_clip3(i_qp, 12, 63) : SPEC_QP(i_qp);
 	sh->i_qp_delta = sh->i_qp - pps->i_pic_init_qp;
     sh->b_sp_for_swidth = 0;
     sh->i_qs_delta = 0;
@@ -230,7 +229,7 @@ static void slice_header_write( x264_t *h, bs_t *s, x264_slice_header_t *sh, int
             //dct coef encoding table to use: 1 for I-frames
             bs_write1(s, 1);
             //qp
-            bs_write(s, 6, (sh->i_qp % 6) + 12 + 6*mobi_qyx(h));
+            bs_write(s, 6, mobi_qp(h, sh->i_qp));
         }
         else
         {
@@ -239,11 +238,11 @@ static void slice_header_write( x264_t *h, bs_t *s, x264_slice_header_t *sh, int
             x264_mobiclip_reset_pre(h);
             bs_write1(s, 0);
             //qp delta
-            int cur_hqp = (sh->i_qp % 6) + 12 + 6*mobi_qyx(h);
+            int cur_hqp = mobi_qp(h, sh->i_qp);
             bs_write_se(s, cur_hqp - h->i_mobi_old_qp);
         }
         {
-            int hqp = (sh->i_qp % 6) + 12 + 6*mobi_qyx(h);
+            int hqp = mobi_qp(h, sh->i_qp);
             h->i_mobi_old_qp = hqp;
         }
         return;
@@ -1289,7 +1288,15 @@ static int validate_parameters( x264_t *h, int b_open )
     }
     h->param.analyse.i_trellis = x264_clip3( h->param.analyse.i_trellis, 0, 2 );
     if( h->param.i_mobiclip )
+    {
         h->param.analyse.i_trellis = 0;
+        /* Mobiclip has no per-macroblock QP: the quantizer is a single slice
+         * header field.  Adaptive quantization would make the encoder's own
+         * reconstruction use a QP the decoder never sees, and the mismatch
+         * accumulates through P-frame prediction. */
+        h->param.rc.i_aq_mode = X264_AQ_NONE;
+        h->param.rc.b_mb_tree = 0;
+    }
     h->param.rc.i_aq_mode = x264_clip3( h->param.rc.i_aq_mode, 0, 3 );
     h->param.rc.f_aq_strength = x264_clip3f( h->param.rc.f_aq_strength, 0, 3 );
     if( h->param.rc.f_aq_strength == 0 )
