@@ -1219,12 +1219,12 @@ static int validate_parameters( x264_t *h, int b_open )
     h->param.analyse.intra &= X264_ANALYSE_I4x4|X264_ANALYSE_I8x8;
     if( !(h->param.analyse.inter & X264_ANALYSE_PSUB16x16) )
         h->param.analyse.inter &= ~X264_ANALYSE_PSUB8x8;
-    /* Mobiclip: force 4x4 luma transform.  4x4 round-trips exactly against the
-     * decoder; luma 8x8 currently reconstructs incorrectly.  Chroma is always
-     * coded 8x8 (its quant tables are force-initialized in x264_cqm_init). */
+    /* Mobiclip: luma may be coded 4x4 or 8x8; chroma is always 8x8 (its quant
+     * tables are force-initialized in x264_cqm_init).  8x8 luma used to
+     * reconstruct incorrectly because it was scanned with the inverse of the
+     * decoder's zigzag -- see mobi_scan_8x8() -- so it was forced off here. */
     if( h->param.i_mobiclip )
     {
-        h->param.analyse.b_transform_8x8 = 0;
         h->param.b_deblocking_filter = 0;
         h->param.i_bframe = 0;
         /* Reference only the immediately previous frame.  The Mobiclip P-frame
@@ -1244,11 +1244,17 @@ static int validate_parameters( x264_t *h, int b_open )
          * sides and stays bit-exact regardless of sub-pel.  (The historic
          * "catastrophic drift" was actually the inter-luma residual bug, now
          * fixed.)  Allow MOBI_SUBME to override for tuning. */
-        h->param.analyse.i_subpel_refine = getenv("MOBI_SUBME") ? atoi(getenv("MOBI_SUBME")) : 2;
         /* NOTE: subme=1 is x264's special "fast" half-pel mode and DESYNCS the
-         * Mobiclip decoder; subme>=2 is bit-exact.  subme>=6 enables RD mode
-         * decision whose cost model (x264 quant/recon) mis-predicts for Mobiclip
-         * and inflates intra-in-P, growing files.  subme=2 is the sweet spot. */
+         * Mobiclip decoder, so clamp up to 2.  subme>=6 enables RD mode
+         * decision; that used to inflate files because the RD cost model was
+         * predicting against a quantizer and reconstruction that did not match
+         * the decoder.  Both are decoder-exact now and the bit half of the cost
+         * comes from the real Mobiclip coefficient writer (cavlc.c compiled
+         * with RDO_SKIP_BS), so RD is accurate and worth having -- the preset's
+         * subme now applies as usual. */
+        if( getenv("MOBI_SUBME") )
+            h->param.analyse.i_subpel_refine = atoi( getenv("MOBI_SUBME") );
+        h->param.analyse.i_subpel_refine = X264_MAX( h->param.analyse.i_subpel_refine, 2 );
         /* P-frame (inter) coding IS implemented and bit-exact against the
          * Mobiclip decoder: 16x16 single-reference integer-pel motion comp
          * (luma + planar chroma), MV median prediction, and P-frame residual
