@@ -1082,18 +1082,35 @@ static ALWAYS_INLINE void macroblock_encode_internal( x264_t *h, int plane_count
                     for( int y = 0; y < 16; y++ )
                         memcpy( save + y*16, h->mb.pic.p_fdec[p] + y*FDEC_STRIDE, 16*sizeof(pixel) );
                 int i_decimate_p = 0;
-                for( int i4x4 = 0; i4x4 < 16; i4x4++ )
-                {
-                    x264_mb_encode_i4x4( h, p, i4x4, i_qp, 0, 0 );
-                    if( h->mb.cache.non_zero_count[x264_scan8[p*16+i4x4]] && b_decimate )
-                        i_decimate_p += h->quantf.decimate_score16( h->dct.luma4x4[p*16+i4x4] );
-                }
+                /* The coefficient writer picks 8x8 vs 4x4 from b_transform_8x8,
+                 * so the residual must be coded the same way here or it writes
+                 * luma8x8[] blocks the reconstruction never produced. */
+                if( h->mb.b_transform_8x8 )
+                    for( int i8 = 0; i8 < 4; i8++ )
+                    {
+                        x264_mb_encode_i8x8( h, p, i8, i_qp, 0, NULL, 0 );
+                        if( h->mb.cache.non_zero_count[x264_scan8[p*16+i8*4]] && b_decimate )
+                            i_decimate_p += h->quantf.decimate_score64( h->dct.luma8x8[p*4+i8] );
+                    }
+                else
+                    for( int i4x4 = 0; i4x4 < 16; i4x4++ )
+                    {
+                        x264_mb_encode_i4x4( h, p, i4x4, i_qp, 0, 0 );
+                        if( h->mb.cache.non_zero_count[x264_scan8[p*16+i4x4]] && b_decimate )
+                            i_decimate_p += h->quantf.decimate_score16( h->dct.luma4x4[p*16+i4x4] );
+                    }
                 if( b_decimate && i_decimate_p < 6 )
                 {
                     /* Drop the residual: restore pure MC prediction, clear nnz. */
                     CLEAR_16x16_NNZ( p );
                     for( int y = 0; y < 16; y++ )
                         memcpy( h->mb.pic.p_fdec[p] + y*FDEC_STRIDE, save + y*16, 16*sizeof(pixel) );
+                }
+                else if( h->mb.b_transform_8x8 )
+                {
+                    for( int i8 = 0; i8 < 4; i8++ )
+                        if( h->mb.cache.non_zero_count[x264_scan8[p*16+i8*4]] )
+                            h->mb.i_cbp_luma |= 1 << i8;
                 }
                 else
                     for( int i4x4 = 0; i4x4 < 16; i4x4++ )
@@ -1121,9 +1138,7 @@ static ALWAYS_INLINE void macroblock_encode_internal( x264_t *h, int plane_count
 
                     if( nz )
                     {
-						for (int i = 0; i < 64; i++)
-							h->dct.luma8x8[p * 4 + idx][i] = dct8x8[idx][ZigZagTable8x8[i]];
-                        //h->zigzagf.scan_8x8( h->dct.luma8x8[p*4+idx], dct8x8[idx] );
+                        mobi_scan_8x8( h, h->dct.luma8x8[p*4+idx], dct8x8[idx] );
                         if( b_decimate )
                         {
                             int i_decimate_8x8 = h->quantf.decimate_score64( h->dct.luma8x8[p*4+idx] );
@@ -1587,9 +1602,7 @@ static ALWAYS_INLINE void macroblock_encode_p8x8_internal( x264_t *h, int i8, in
                 int nnz8x8 = x264_quant_8x8( h, dct8x8, i_qp, ctx_cat_plane[DCT_LUMA_8x8][p], 1, p, i8 );
                 if( nnz8x8 )
                 {
-					for (int i = 0; i < 64; i++)
-						h->dct.luma8x8[p * 4 + i8][i] = dct8x8[ZigZagTable8x8[i]];
-                    //h->zigzagf.scan_8x8( h->dct.luma8x8[4*p+i8], dct8x8 );
+                    mobi_scan_8x8( h, h->dct.luma8x8[4*p+i8], dct8x8 );
 
                     if( b_decimate && !h->mb.b_trellis )
                         nnz8x8 = 4 <= h->quantf.decimate_score64( h->dct.luma8x8[4*p+i8] );

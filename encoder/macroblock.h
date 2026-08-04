@@ -160,6 +160,23 @@ static ALWAYS_INLINE void mobi_add8x8_idct8( pixel *p_dst, int *mat )
             p_dst[y*FDEC_STRIDE+x] = x264_clip_pixel( p_dst[y*FDEC_STRIDE+x] + (mat[y*8+x] >> 6) );
     }
 }
+/* Scan an 8x8 coefficient block into coded order.
+ *
+ * The Mobiclip decoder scans 8x8 blocks with ff_zigzag_direct, which is
+ * mobi_zigzag8x8 -- the plain scan-index -> position table.  This fork used
+ * ZigZagTable8x8, the *inverse* permutation (position -> scan index), so 8x8
+ * luma coefficients landed in the wrong slots; that is why luma 8x8 was
+ * force-disabled in mobiclip mode.  Chroma always used the right table, which
+ * is why only luma was affected.  Non-mobiclip encoding keeps x264's own scan. */
+static ALWAYS_INLINE void mobi_scan_8x8( x264_t *h, dctcoef level[64], dctcoef dct[64] )
+{
+    if( h->param.i_mobiclip )
+        for( int i = 0; i < 64; i++ )
+            level[i] = dct[mobi_zigzag8x8[i]];
+    else
+        h->zigzagf.scan_8x8( level, dct );
+}
+
 /* Mobiclip's own forward transforms.  Structurally these are the H.264 integer
  * DCTs, but the reference encoder keeps every intermediate in int16 and runs
  * the 8x8 column pass *before* the row pass.  The >>1 / >>2 truncations make
@@ -883,9 +900,7 @@ static ALWAYS_INLINE void x264_mb_encode_i8x8( x264_t *h, int p, int idx, int i_
     if( nz )
     {
         h->mb.i_cbp_luma |= 1<<idx;
-		for (int i = 0; i < 64; i++)
-			h->dct.luma8x8[p * 4 + idx][i] = dct8x8[ZigZagTable8x8[i]];
-        //h->zigzagf.scan_8x8( h->dct.luma8x8[p*4+idx], dct8x8 );
+        mobi_scan_8x8( h, h->dct.luma8x8[p*4+idx], dct8x8 );
         if( h->param.i_mobiclip )
         {
             /* Decoder-exact 8x8 dequant: level * (DQ[q%6][pos] << (q/6 - 2)).
