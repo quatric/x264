@@ -1231,12 +1231,17 @@ static int validate_parameters( x264_t *h, int b_open )
          * ref-selection (FRAME0..FRAME4 / sidx wrap) is only validated for the
          * single-reference case so far; multi-ref desyncs the decoder. */
         h->param.i_frame_reference = 1;
-        /* Force 16x16-only inter partitions.  The H_SPLIT/V_SPLIT sub-partition
-         * MV coding does not yet round-trip against the decoder; 16x16 P_L0 /
-         * P_SKIP uses the simple single-MV path which does.
-         * Keep I4x4/I8x8 intra flags so x264 doesn't fall back to I16x16,
-         * which the Mobiclip encoder does not support. */
-        h->param.analyse.inter &= X264_ANALYSE_I4x4|X264_ANALYSE_I8x8;
+        /* Inter sub-partitions map onto the format's recursive H_SPLIT/V_SPLIT
+         * partition modes, which cavlc.c already writes (16x16 -> 16x8/8x16 ->
+         * 8x8 -> 8x4/4x8 -> 4x4) and mobi_motion_compensate already
+         * reconstructs per 4x4.  They were disabled because the sub-partition
+         * MV coding "does not round-trip", which was really the inter-luma
+         * residual bug; they round-trip and are a consistent win now.
+         * B-partitions stay off (no B-frames), and the I4x4/I8x8 intra flags
+         * stay so x264 doesn't fall back to I16x16, which Mobiclip has no
+         * representation for. */
+        h->param.analyse.inter &= X264_ANALYSE_I4x4|X264_ANALYSE_I8x8|
+                                  X264_ANALYSE_PSUB16x16|X264_ANALYSE_PSUB8x8;
         /* Sub-pel motion: Mobiclip supports half-pel MC.  The encoder maps
          * x264's quarter-pel cache.mv to Mobiclip's half-pel MV via >>1 in BOTH
          * the reconstruction (mobi_motion_compensate) and the bitstream write
@@ -1270,18 +1275,25 @@ static int validate_parameters( x264_t *h, int b_open )
         }
         else if( h->param.i_keyint_max <= 1 )
             h->param.i_keyint_max = 30;
-        /* x264's CQP mode applies f_ip_factor (~1.4 default), giving I-frames
-         * a QP ~3 lower than P-frames.  That can push I-frame QP below the
-         * decoder minimum of 12.  Fix both factors to 1.0 (equal QP for all
-         * frame types) so -qp N produces exactly QP N for every frame. */
-        h->param.rc.f_ip_factor = 1.0f;
-        h->param.rc.f_pb_factor = 1.0f;
-        /* The decoder rejects quantizers < 12 (loc 2 in setup_qtables).
-         * Also cap the max reasonably so Q+24 doesn't exceed the max size of
-         * the 6-bit header field (63 → 63+24 = 87, still well under 161). */
+        /* In CQP mode x264 applies f_ip_factor (~1.4), so -qp N would not
+         * actually produce QP N.  Pin the factors to 1.0 there so the option
+         * means what it says.  Under CRF/ABR the factors are how rate control
+         * spends bits across frame types, and the qp_min below keeps I-frames
+         * off the decoder's floor, so leave them alone. */
+        if( h->param.rc.i_rc_method == X264_RC_CQP )
+        {
+            h->param.rc.f_ip_factor = 1.0f;
+            h->param.rc.f_pb_factor = 1.0f;
+        }
+        /* The quantizer is written straight into the 6-bit header field and the
+         * decoder rejects anything below 12 (setup_qtables), so the usable
+         * range is exactly [12,63].  Bound rate control by it rather than
+         * letting mobi_qp() clamp behind RC's back -- RC would then model a
+         * quantizer the encoder never used.  (The old cap of 39 dated from the
+         * header carrying qp%6+12+6*QYX, where 39 mapped to 63.) */
         h->param.rc.i_qp_min = X264_MAX(h->param.rc.i_qp_min, 12);
-        h->param.rc.i_qp_max = X264_MIN(h->param.rc.i_qp_max, 39);
-        h->param.rc.f_rf_constant = X264_MIN(h->param.rc.f_rf_constant, 39);
+        h->param.rc.i_qp_max = X264_MIN(h->param.rc.i_qp_max, 63);
+        h->param.rc.f_rf_constant = x264_clip3f(h->param.rc.f_rf_constant, 12, 63);
     }
     /* CABAC init/encode is disabled (commented out) in this build; force
      * CAVLC so the PPS entropy_coding_mode_flag matches the actual encoding. */
