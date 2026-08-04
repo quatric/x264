@@ -1231,17 +1231,22 @@ static int validate_parameters( x264_t *h, int b_open )
          * ref-selection (FRAME0..FRAME4 / sidx wrap) is only validated for the
          * single-reference case so far; multi-ref desyncs the decoder. */
         h->param.i_frame_reference = 1;
-        /* Inter sub-partitions map onto the format's recursive H_SPLIT/V_SPLIT
-         * partition modes, which cavlc.c already writes (16x16 -> 16x8/8x16 ->
-         * 8x8 -> 8x4/4x8 -> 4x4) and mobi_motion_compensate already
-         * reconstructs per 4x4.  They were disabled because the sub-partition
-         * MV coding "does not round-trip", which was really the inter-luma
-         * residual bug; they round-trip and are a consistent win now.
-         * B-partitions stay off (no B-frames), and the I4x4/I8x8 intra flags
-         * stay so x264 doesn't fall back to I16x16, which Mobiclip has no
-         * representation for. */
+        /* 16x8 / 8x16 / 8x8 inter partitions map onto the format's recursive
+         * H_SPLIT/V_SPLIT modes, which cavlc.c writes and
+         * mobi_motion_compensate reconstructs per 4x4; they are verified
+         * bit-exact against the decoder (tools/mobiclip_bitexact.sh) and are
+         * worth a few percent, so they are on.
+         *
+         * Sub-8x8 partitions (PSUB8x8: 8x4/4x8/4x4) are not: they still
+         * produce occasional macroblocks whose reconstruction the decoder
+         * cannot reproduce, so they stay off pending diagnosis.  MOBI_PSUB8x8
+         * enables them for that work.
+         *
+         * The I4x4/I8x8 intra flags stay so x264 doesn't fall back to I16x16,
+         * which Mobiclip has no representation for. */
         h->param.analyse.inter &= X264_ANALYSE_I4x4|X264_ANALYSE_I8x8|
-                                  X264_ANALYSE_PSUB16x16|X264_ANALYSE_PSUB8x8;
+            X264_ANALYSE_PSUB16x16|
+            (getenv("MOBI_PSUB8x8") ? X264_ANALYSE_PSUB8x8 : 0);
         /* Sub-pel motion: Mobiclip supports half-pel MC.  The encoder maps
          * x264's quarter-pel cache.mv to Mobiclip's half-pel MV via >>1 in BOTH
          * the reconstruction (mobi_motion_compensate) and the bitstream write
@@ -1314,6 +1319,13 @@ static int validate_parameters( x264_t *h, int b_open )
          * accumulates through P-frame prediction. */
         h->param.rc.i_aq_mode = X264_AQ_NONE;
         h->param.rc.b_mb_tree = 0;
+        /* Chroma-aware motion estimation (subme >= 5) scores candidate MVs
+         * with x264_mb_mc_chroma(), H.264's 1/8-pel bilinear chroma filter.
+         * Mobiclip's chroma prediction is mobi_interp_block()'s half-pel
+         * shift-average instead, so chroma ME both optimises against a
+         * prediction the format never produces and leaves the encoder
+         * reconstructing chroma the decoder does not reproduce. */
+        h->param.analyse.b_chroma_me = 0;
     }
     h->param.rc.i_aq_mode = x264_clip3( h->param.rc.i_aq_mode, 0, 3 );
     h->param.rc.f_aq_strength = x264_clip3f( h->param.rc.f_aq_strength, 0, 3 );

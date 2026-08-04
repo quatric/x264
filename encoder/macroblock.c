@@ -347,33 +347,35 @@ static void mobi_motion_compensate( x264_t *h )
             mobi_interp_block( dst, FDEC_STRIDE, src, sy, 1, 4, 4, method );
         }
 
-    /* Chroma (4:2:0), per 4x4 chroma block = one luma 8x8 quadrant.  The
-     * reference chroma is interleaved UV; the decoder's chroma MV is the luma
-     * (half-pel) MV >> 1 and operates on half-resolution coordinates. */
-    for( int q = 0; q < 4; q++ )
+    /* Chroma (4:2:0), per 2x2 chroma block = one luma 4x4.  The decoder motion
+     * compensates chroma once per *partition*, at half resolution, with the
+     * partition's luma half-pel MV >> 1.  Doing it per 4x4 luma block matches
+     * that for every partition shape: within a partition all 4x4s carry the
+     * same MV, and the interpolation only ever reads one pixel past the block,
+     * so the per-block results tile into exactly the partition-sized result.
+     * (Per 8x8 quadrant, as this used to be, is only correct while partitions
+     * are 8x8 or larger -- sub-8x8 partitions got one quadrant MV applied to
+     * chroma the decoder split four ways.)
+     *
+     * Mobiclip chroma is PLANAR: U = p_fref[..][4] (plane[1]), V =
+     * p_fref[..][8] (plane[2]); read each with unit stride, not interleaved. */
+    for( int b = 0; b < 16; b++ )
     {
-        int cqx = (q & 1) * 4;
-        int cqy = (q >> 1) * 4;
-        /* Cache index of the luma 8x8 quadrant's top-left 4x4.  The cache is an
-         * 8-wide grid, so the quadrant at 4x4-grid (col,row)=((q&1)*2,(q>>1)*2)
-         * is scan8[0] + col + row*8.  (q*4 would read neighbouring MBs.) */
-        int i8  = x264_scan8[0] + (q & 1) * 2 + (q >> 1) * 2 * 8;
+        int cqx = (b & 3) * 2;
+        int cqy = (b >> 2) * 2;
+        int i8  = x264_scan8[0] + (b & 3) + (b >> 2) * 8;
         int iref = h->mb.cache.ref[0][i8];
         if( iref < 0 ) iref = 0;
         int cmvx = (h->mb.cache.mv[0][i8][0] >> 1) >> 1;  /* -> chroma half-pel */
         int cmvy = (h->mb.cache.mv[0][i8][1] >> 1) >> 1;
         int method = (cmvx & 1) | ((cmvy & 1) << 1);
-        /* Mobiclip chroma is PLANAR: U = p_fref[..][4] (plane[1]),
-         * V = p_fref[..][8] (plane[2]).  Read each plane with unit stride
-         * (xs=1), NOT interleaved (xs=2).  The decoder does motion compensation
-         * separately on data[1] (U) and data[2] (V). */
         int srcoff = (cqy + (cmvy >> 1)) * sc + (cqx + (cmvx >> 1));
         for( int ch = 0; ch < 2; ch++ )
         {
             pixel *refc = h->mb.pic.p_fref[0][iref][4 + ch*4];  /* [4]=U, [8]=V */
             pixel *src = refc + srcoff;
             pixel *dst = h->mb.pic.p_fdec[1 + ch] + cqy * FDEC_STRIDE + cqx;
-            mobi_interp_block( dst, FDEC_STRIDE, src, sc, 1, 4, 4, method );
+            mobi_interp_block( dst, FDEC_STRIDE, src, sc, 1, 2, 2, method );
         }
     }
 }
@@ -1022,8 +1024,17 @@ static ALWAYS_INLINE void macroblock_encode_internal( x264_t *h, int plane_count
         }
         /* Replace x264's MC prediction with Mobiclip's interpolation so the
          * residual reconstructs correctly in the Mobiclip decoder. */
-    if( h->param.i_mobiclip )
+        if( h->param.i_mobiclip )
+        {
+            /* Analysis can leave i_partition at D_16x16 on a P_8x8 macroblock.
+             * mobi_encode_p_partition() keys the 16x8 -> 8x8 split on
+             * i_partition, so a stale value makes it write a two-16x8 partition
+             * tree while the MV field really holds four 8x8 MVs -- the decoder
+             * then reconstructs different motion than the encoder did. */
+            if( h->mb.i_type == P_8x8 )
+                h->mb.i_partition = D_8x8;
             mobi_motion_compensate( h );
+        }
 #endif
 
         if( h->mb.b_lossless )
@@ -1085,7 +1096,7 @@ static ALWAYS_INLINE void macroblock_encode_internal( x264_t *h, int plane_count
                 /* The coefficient writer picks 8x8 vs 4x4 from b_transform_8x8,
                  * so the residual must be coded the same way here or it writes
                  * luma8x8[] blocks the reconstruction never produced. */
-                if( h->mb.b_transform_8x8 )
+                if( mobi_use_8x8( h ) )
                     for( int i8 = 0; i8 < 4; i8++ )
                     {
                         x264_mb_encode_i8x8( h, p, i8, i_qp, 0, NULL, 0 );
@@ -1106,7 +1117,7 @@ static ALWAYS_INLINE void macroblock_encode_internal( x264_t *h, int plane_count
                     for( int y = 0; y < 16; y++ )
                         memcpy( h->mb.pic.p_fdec[p] + y*FDEC_STRIDE, save + y*16, 16*sizeof(pixel) );
                 }
-                else if( h->mb.b_transform_8x8 )
+                else if( mobi_use_8x8( h ) )
                 {
                     for( int i8 = 0; i8 < 4; i8++ )
                         if( h->mb.cache.non_zero_count[x264_scan8[p*16+i8*4]] )
