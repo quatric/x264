@@ -1524,6 +1524,55 @@ static void mb_analyse_inter_p8x8( x264_t *h, x264_mb_analysis_t *a )
         x264_mb_predict_mv( h, 0, 4*i, 2, m->mvp );
         x264_me_search( h, m, mvc, i_mvc );
 
+#if !HIGH_BIT_DEPTH
+        /* Re-score {found MV, zero, predictor} for this 8x8 sub-block by
+         * retail cost, same bounded pattern already verified safe for
+         * P16x16 (mobi_ratecost.c / mobiclip-native-mode-decision-port
+         * memory note): retail picks among candidates x264 already has
+         * cheaply, cost/cost_mv reported back in x264's native SATD domain
+         * afterward so downstream comparisons (i_cost8x8 sum, later
+         * x264_me_refine_qpel if D_8x8 wins) keep operating on the scale
+         * they assume. */
+        if( h->param.i_mobiclip )
+        {
+            int qp = mobi_qp( h, h->mb.i_qp );
+            int16_t cand_mv[3][2] = {
+                { m->mv[0], m->mv[1] },
+                { 0, 0 },
+                { m->mvp[0], m->mvp[1] },
+            };
+            int best_retail = INT_MAX, best_idx = 0;
+            for( int c = 0; c < 3; c++ )
+            {
+                int mvx = cand_mv[c][0], mvy = cand_mv[c][1];
+                if( mvx < h->mb.mv_min_spel[0] || mvx > h->mb.mv_max_spel[0] ||
+                    mvy < h->mb.mv_min_spel[1] || mvy > h->mb.mv_max_spel[1] )
+                    continue;
+                ALIGNED_ARRAY_16( pixel, pred_buf, [8*8] );
+                h->mc.mc_luma( pred_buf, 8, m->p_fref, m->i_stride[0], mvx, mvy, 8, 8, m->weight );
+                uint8_t s8[64], p8[64];
+                for( int yy = 0; yy < 8; yy++ )
+                    for( int xx = 0; xx < 8; xx++ )
+                    {
+                        s8[yy*8+xx] = p_fenc[0][(8*y8+yy)*FENC_STRIDE + 8*x8+xx];
+                        p8[yy*8+xx] = pred_buf[yy*8+xx];
+                    }
+                int total = mobi_rescore_8x8( s8, p8, 8, qp, a->i_lambda, 0 );
+                if( total < best_retail ) { best_retail = total; best_idx = c; }
+            }
+            if( best_idx != 0 )
+            {
+                m->mv[0] = cand_mv[best_idx][0];
+                m->mv[1] = cand_mv[best_idx][1];
+                ALIGNED_ARRAY_16( pixel, pred_buf, [8*8] );
+                h->mc.mc_luma( pred_buf, 8, m->p_fref, m->i_stride[0], m->mv[0], m->mv[1], 8, 8, m->weight );
+                int satd = h->pixf.mbcmp[PIXEL_8x8]( p_fenc[0] + 8*y8*FENC_STRIDE + 8*x8, FENC_STRIDE, pred_buf, 8 );
+                m->cost_mv = m->p_cost_mv[ m->mv[0] - m->mvp[0] ] + m->p_cost_mv[ m->mv[1] - m->mvp[1] ];
+                m->cost = satd + m->cost_mv;
+            }
+        }
+#endif
+
         x264_macroblock_cache_mv_ptr( h, 2*x8, 2*y8, 2, 2, 0, m->mv );
 
         CP32( mvc[i_mvc], m->mv );
