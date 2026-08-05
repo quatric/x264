@@ -487,6 +487,9 @@ REALIGN_STACK void x264_param_default( x264_param_t *param )
     param->i_mobiclip = 0;
     param->i_mobi_qyx = -1;
     param->b_moflex = 0;
+    param->i_mobi_cq_iboost = -1;
+    param->i_mobi_cq_ithreshold = -1;
+    param->i_mobi_cq_interval = -1;
 }
 
 static int param_apply_preset( x264_param_t *param, const char *preset )
@@ -1002,6 +1005,12 @@ REALIGN_STACK int x264_param_parse( x264_param_t *p, const char *name, const cha
         p->i_mobi_qyx = atoi(value);
     OPT("moflex")
         p->b_moflex = atobool(value);
+    OPT("mobi-cq-iboost")
+        p->i_mobi_cq_iboost = atoi(value);
+    OPT("mobi-cq-ithreshold")
+        p->i_mobi_cq_ithreshold = atoi(value);
+    OPT("mobi-cq-interval")
+        p->i_mobi_cq_interval = atoi(value);
     OPT("sar")
     {
         b_error |= ( 2 != sscanf( value, "%d:%d", &p->vui.i_sar_width, &p->vui.i_sar_height ) &&

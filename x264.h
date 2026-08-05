@@ -378,6 +378,18 @@ typedef struct x264_param_t
     int b_moflex;   /* 1 = MOFLEX mode (flexible), 0 = standard Mobiclip mode */
     int i_mobi_qyx; /* Mobiclip QY extension tier (0-15) */
 
+    /* Retail Mobiclip's exact CQ rate-control policy (mobi_ratecontrol.c),
+     * used in place of x264's own CQP path when i_mobiclip is set and no
+     * bitrate target (b_abr/b_2pass) is active -- i.e. retail's own
+     * "no peak limiter" Constant Quality mode. -1 disables this and falls
+     * back to plain CQP with rc.i_qp_constant, matching pre-existing
+     * behaviour (the i_qfactor/sc_threshold-based approximation encode.py
+     * used before this policy existed still works for --bitrate mode,
+     * which this policy does not cover). */
+    int i_mobi_cq_iboost;     /* retail IBoostPercent, 0-100. -1 = disabled/default 40 */
+    int i_mobi_cq_ithreshold; /* retail IThreshold, 0-100. -1 = disabled/default 90 */
+    int i_mobi_cq_interval;   /* retail keyframe interval in frames. -1 = disabled/use i_keyint_max */
+
     int         b_deblocking_filter;
     int         i_deblocking_filter_alphac0;    /* [-6, 6] -6 light filter, 6 strong */
     int         i_deblocking_filter_beta;       /* [-6, 6]  idem */
