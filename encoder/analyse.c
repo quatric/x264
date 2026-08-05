@@ -2981,6 +2981,34 @@ static inline void mb_analyse_qp_rd( x264_t *h, x264_mb_analysis_t *a )
     }
 }
 
+#if !HIGH_BIT_DEPTH
+/* Retail Mobiclip's SAD-rate cost (mobi_ratecost.c) for one inter block of
+ * size w x h (multiples of 8, no deeper than 8x8 -- PSUB8x8 sub-partitions
+ * are out of scope, see the P16x16/partition re-score call sites), built by
+ * motion-compensating m's already-found MV and summing retail's per-8x8
+ * cost over the block. */
+static int mobi_retail_block_cost( x264_t *h, x264_me_t *m, const pixel *fenc, int fenc_stride,
+                                    int w, int hh, int qp, int lambda )
+{
+    ALIGNED_ARRAY_16( pixel, buf, [16*16] );
+    h->mc.mc_luma( buf, w, m->p_fref, m->i_stride[0], m->mv[0], m->mv[1], w, hh, m->weight );
+    int total = 0;
+    for( int oy = 0; oy < hh; oy += 8 )
+        for( int ox = 0; ox < w; ox += 8 )
+        {
+            uint8_t s8[64], p8[64];
+            for( int yy = 0; yy < 8; yy++ )
+                for( int xx = 0; xx < 8; xx++ )
+                {
+                    s8[yy*8+xx] = fenc[(oy+yy)*fenc_stride + ox+xx];
+                    p8[yy*8+xx] = buf[(oy+yy)*w + ox+xx];
+                }
+            total += mobi_rescore_8x8( s8, p8, 8, qp, lambda, 0 );
+        }
+    return total;
+}
+#endif
+
 /*****************************************************************************
  * x264_macroblock_analyse:
  *****************************************************************************/
@@ -3267,6 +3295,55 @@ skip_analysis:
                 mb_analyse_inter_p8x16( h, &analysis, i_cost );
                 COPY3_IF_LT( i_cost, analysis.l0.i_cost8x16, i_type, P_L0, i_partition, D_8x16 );
             }
+
+#if !HIGH_BIT_DEPTH
+            /* Re-score the discrete D_16x16/D_16x8/D_8x16/D_8x8 partition
+             * choice by retail cost, using whichever of x264's own
+             * already-computed candidates are actually valid -- same
+             * pattern as the intra4x4 mode sweep (discrete, fully
+             * enumerable choice, unlike P16x16's continuous MV search).
+             * Skip entirely when PSUB8x8 (8x4/4x8/4x4) is active: that path
+             * is already flagged elsewhere (encoder/encoder.c, MOBI_PSUB8x8)
+             * as not-yet-reconstruction-exact, and this re-score assumes
+             * every D_8x8 quadrant is a plain 8x8 (true whenever PSUB8x8 is
+             * off, which is this fork's mobiclip default). */
+            if( h->param.i_mobiclip && !(flags & X264_ANALYSE_PSUB8x8) )
+            {
+                int qp = mobi_qp( h, h->mb.i_qp );
+                int lambda = analysis.i_lambda;
+                pixel *fenc = h->mb.pic.p_fenc[0];
+
+                int best_cost = mobi_retail_block_cost( h, &analysis.l0.me16x16, fenc, FENC_STRIDE, 16, 16, qp, lambda );
+                int best_type = P_L0, best_part = D_16x16;
+
+                if( analysis.l0.i_cost16x8 < COST_MAX )
+                {
+                    int c = mobi_retail_block_cost( h, &analysis.l0.me16x8[0], fenc, FENC_STRIDE, 16, 8, qp, lambda )
+                          + mobi_retail_block_cost( h, &analysis.l0.me16x8[1], fenc + 8*FENC_STRIDE, FENC_STRIDE, 16, 8, qp, lambda );
+                    if( c < best_cost ) { best_cost = c; best_type = P_L0; best_part = D_16x8; }
+                }
+                if( analysis.l0.i_cost8x16 < COST_MAX )
+                {
+                    int c = mobi_retail_block_cost( h, &analysis.l0.me8x16[0], fenc, FENC_STRIDE, 8, 16, qp, lambda )
+                          + mobi_retail_block_cost( h, &analysis.l0.me8x16[1], fenc + 8, FENC_STRIDE, 8, 16, qp, lambda );
+                    if( c < best_cost ) { best_cost = c; best_type = P_L0; best_part = D_8x16; }
+                }
+                if( analysis.l0.i_cost8x8 < COST_MAX )
+                {
+                    int c = 0;
+                    for( int i8 = 0; i8 < 4; i8++ )
+                    {
+                        int ox = (i8&1)*8, oy = (i8>>1)*8;
+                        c += mobi_retail_block_cost( h, &analysis.l0.me8x8[i8], fenc + oy*FENC_STRIDE + ox, FENC_STRIDE, 8, 8, qp, lambda );
+                    }
+                    if( c < best_cost ) { best_cost = c; best_type = P_L0; best_part = D_8x8; }
+                }
+                if( getenv( "MOBI_PART_LOG" ) && best_part != i_partition )
+                    fprintf( stderr, "MOBI_PART flip x264=%d retail=%d\n", i_partition, best_part );
+                i_type = best_type;
+                i_partition = best_part;
+            }
+#endif
 
             h->mb.i_partition = i_partition;
 
