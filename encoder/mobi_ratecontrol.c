@@ -94,6 +94,23 @@ int32_t mobi_cq_decide( mobi_cq_policy_t *policy, int32_t total_frame_count,
     return mobi_cq_pre_encode( policy, total_frame_count, is_keyframe );
 }
 
+int32_t mobi_cq_qp_for_frame( mobi_cq_policy_t *policy, int32_t total_frame_count, int is_keyframe )
+{
+    (void)total_frame_count;
+    float target = policy->base_qp;
+    if( is_keyframe )
+    {
+        target = mobi_cq_boosted_target( policy->base_qp, policy->boost_percent );
+        if( target < 12.0f ) target = 12.0f;
+        else if( target > 48.0f ) target = 48.0f;
+    }
+    policy->target_qp = target;
+    int32_t qp = mobi_cq_round_target_adjustment( target, policy->adjustment );
+    if( qp < 12 ) qp = 12;
+    else if( qp > 48 ) qp = 48;
+    return qp;
+}
+
 void mobi_cq_feedback( mobi_cq_policy_t *policy, int32_t qp_used )
 {
     /* asm: fildl qp; fsubrs target (FSUBR reverses operand order: st0 =
