@@ -28,7 +28,8 @@ SRCS_X = common/mc.c common/predict.c common/pixel.c common/macroblock.c \
          encoder/analyse.c encoder/me.c encoder/ratecontrol.c \
          encoder/set.c encoder/macroblock.c encoder/cabac.c \
          encoder/cavlc.c encoder/encoder.c encoder/lookahead.c \
-         encoder/mobi_ratecost.c encoder/mobi_ratecost_tables.c
+         encoder/mobi_ratecost.c encoder/mobi_ratecost_tables.c \
+         encoder/mobi_ratecontrol.c
 
 SRCS_8 =
 
