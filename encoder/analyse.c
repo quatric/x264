@@ -3089,13 +3089,30 @@ intra_analysis:
         i_cost = analysis.i_satd_i16x16;
         if( h->param.i_mobiclip )
         {
-            /* The Mobiclip decoder only supports per-4x4 intra prediction
-             * (I_4x4).  I_16x16 / I_8x8 macroblocks are encoded by encode_i_block
-             * in a form the decoder cannot parse and desync the whole frame.
-             * Always force I_4x4.  (The rebase to upstream x264 dropped this
-             * mobiclip constraint, which re-introduced I_16x16 MBs.) */
+            /* I_16x16 is encoded by encode_i_block in a form the Mobiclip
+             * decoder cannot parse and desyncs the whole frame, so it stays
+             * banned.  (A rebase to upstream x264 once dropped this constraint
+             * and re-introduced I_16x16 MBs.)
+             *
+             * I_8x8 *is* representable: the decoder's process_block() reads a
+             * ue(0) "don't subdivide" golomb and then predicts the whole 8x8
+             * with predict_intra(size=8), which is exactly what cavlc.c's
+             * b_transform_8x8 branch writes.  It needs b_transform_8x8 to be on
+             * (the coefficient writer and x264_mb_encode_i8x8 both key off it),
+             * and it needs mobi_predict_8x8 for reconstruction -- without a
+             * Mobiclip-exact 8x8 predictor the encoder's reference diverges from
+             * the decoder's and drifts through the GOP.
+             *
+             * Opt-in while it earns confidence: MOBI_I8X8=1. */
             h->mb.i_type = I_4x4;
             i_cost = analysis.i_satd_i4x4;
+            /* Gate on the *parameter*, not h->mb.b_transform_8x8: the latter is
+             * still 0 here (macroblock_encode sets it to 1 only once i_type is
+             * I_8x8), so testing it made this branch dead.  i_satd_i8x8 is
+             * COST_MAX when the 8x8 intra analysis did not run, so the compare
+             * is self-guarding too. */
+            if( h->param.analyse.b_transform_8x8 && mobi_i8x8_enabled() )
+                COPY2_IF_LT( i_cost, analysis.i_satd_i8x8, h->mb.i_type, I_8x8 );
         }
         else
         {

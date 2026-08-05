@@ -421,23 +421,35 @@ do\
  * decoder's pget() boundary-clamping rules so the encoder reconstructs the
  * same pixels the decoder will.  Modes: 0=V 1=H 2=plane(unused) 3=DC 4..8=dir.
  * ------------------------------------------------------------------------ */
+/* I_8x8 intra macroblocks for Mobiclip are opt-in while the path earns
+ * confidence.  Defined outside the !HIGH_BIT_DEPTH guard because
+ * analyse.c compiles for both bit depths.  Note: it was force-disabled for a long time and the ban is recorded as
+ * having desynced whole frames when it regressed. */
+static ALWAYS_INLINE int mobi_i8x8_enabled( void )
+{
+    const char *e = getenv( "MOBI_I8X8" );
+    return e && atoi( e );
+}
+
 #if !HIGH_BIT_DEPTH
 /* H.264 4x4 intra mode (0..8) -> Mobiclip intra mode.  MUST stay identical to
  * the table in cavlc.c so the reconstruction prediction matches the mode that
  * gets written into the bitstream (and thus the decoder's predict_intra). */
 static const int mobi_h264_to_mobiclip_mode[9] = { 0, 1, 3, 3, 7, 6, 5, 8, 4 };
 /* read neighbour at block-relative (rx,ry) with decoder pget() semantics */
-static ALWAYS_INLINE int mobi_pget( x264_t *h, pixel *p_dst, int idx, int rx, int ry )
+/* Neighbour fetch for Mobiclip intra prediction, generic over block size.
+ * The caller passes the block's frame-space origin (ax,ay) and its size, so the
+ * same code serves 4x4 and 8x8 luma: the decoder's predict_intra() is one
+ * size-parametrised routine, and every mode formula below is already written in
+ * terms of `size`. */
+static ALWAYS_INLINE int mobi_pget( x264_t *h, pixel *p_dst, int ax, int ay, int size, int rx, int ry )
 {
-    const int size = 4;
+    int mb_x = h->mb.i_mb_x;
+    int mb_y = h->mb.i_mb_y;
     if( rx == -1 && ry >= size )      { rx = -1; ry = size - 1; }
     else if( rx >= -1 && ry >= -1 )   { /* keep */ }
     else if( rx == -1 && ry == -2 )   { rx = 0; ry = -1; }
     else if( rx == -2 && ry == -1 )   { rx = -1; ry = 0; }
-    int mb_x = h->mb.i_mb_x;
-    int mb_y = h->mb.i_mb_y;
-    int ax = mb_x * 16 + block_idx_x[idx] * 4;
-    int ay = mb_y * 16 + block_idx_y[idx] * 4;
 
     int orig_x = ax + rx;
     int orig_y = ay + ry;
@@ -480,19 +492,16 @@ static ALWAYS_INLINE int mobi_pget( x264_t *h, pixel *p_dst, int idx, int rx, in
 }
 static ALWAYS_INLINE int mobi_half( int a, int b )       { return ((a + b) + 1) / 2; }
 static ALWAYS_INLINE int mobi_half3( int a, int b, int c ){ return ((a + b + b + c) * 2 / 4 + 1) / 2; }
-#define MPG(rx,ry) mobi_pget(h,p_dst,idx,(rx),(ry))
-static ALWAYS_INLINE int mobi_half_horz( x264_t *h, pixel *p_dst, int idx, int x, int y )
+#define MPG(rx,ry) mobi_pget(h,p_dst,ax,ay,size,(rx),(ry))
+static ALWAYS_INLINE int mobi_half_horz( x264_t *h, pixel *p_dst, int ax, int ay, int size, int x, int y )
 { return mobi_half3( MPG(x-1,y), MPG(x,y), MPG(x+1,y) ); }
-static ALWAYS_INLINE int mobi_half_vert( x264_t *h, pixel *p_dst, int idx, int x, int y )
+static ALWAYS_INLINE int mobi_half_vert( x264_t *h, pixel *p_dst, int ax, int ay, int size, int x, int y )
 { return mobi_half3( MPG(x,y-1), MPG(x,y), MPG(x,y+1) ); }
 
-static void mobi_predict_4x4( x264_t *h, pixel *p_dst, int idx, int pmode )
+/* Mirrors the decoder's predict_intra() for a size x size luma block at frame
+ * origin (ax,ay).  p_dst is the block's fdec tile position, FDEC_STRIDE. */
+static void mobi_predict_block( x264_t *h, pixel *p_dst, int ax, int ay, int size, int pmode )
 {
-    const int size = 4;
-    int mb_x = h->mb.i_mb_x;
-    int mb_y = h->mb.i_mb_y;
-    int ax = mb_x * 16 + block_idx_x[idx] * 4;
-    int ay = mb_y * 16 + block_idx_y[idx] * 4;
     if( pmode == 3 ) /* DC */
     {
         int fill;
@@ -535,15 +544,15 @@ static void mobi_predict_4x4( x264_t *h, pixel *p_dst, int idx, int pmode )
                 if( (x % 2) == 0 )
                     val = mobi_half( MPG(-1, y + x/2), MPG(-1, y + x/2 + 1) );
                 else
-                    val = mobi_half_vert( h, p_dst, idx, -1, y + x/2 + 1 );
+                    val = mobi_half_vert( h, p_dst, ax, ay, size, -1, y + x/2 + 1 );
                 break;
             case 5: /* pick_5 */
                 if( x == 0 )
                     val = mobi_half( MPG(-1, y-1), MPG(-1, y) );
                 else if( y == 0 )
-                    val = mobi_half_horz( h, p_dst, idx, x-2, y-1 );
+                    val = mobi_half_horz( h, p_dst, ax, ay, size, x-2, y-1 );
                 else if( x == 1 )
-                    val = mobi_half_vert( h, p_dst, idx, x-2, y-1 );
+                    val = mobi_half_vert( h, p_dst, ax, ay, size, x-2, y-1 );
                 else
                     val = MPG(x-2, y-1);
                 break;
@@ -551,9 +560,9 @@ static void mobi_predict_4x4( x264_t *h, pixel *p_dst, int idx, int pmode )
                 if( y == 0 )
                     val = mobi_half( MPG(x-1, -1), MPG(x, -1) );
                 else if( x == 0 )
-                    val = mobi_half_vert( h, p_dst, idx, x-1, y-2 );
+                    val = mobi_half_vert( h, p_dst, ax, ay, size, x-1, y-2 );
                 else if( y == 1 )
-                    val = mobi_half_horz( h, p_dst, idx, x-1, y-2 );
+                    val = mobi_half_horz( h, p_dst, ax, ay, size, x-1, y-2 );
                 else
                     val = MPG(x-1, y-2);
                 break;
@@ -577,13 +586,13 @@ static void mobi_predict_4x4( x264_t *h, pixel *p_dst, int idx, int pmode )
                 if( y == 0 )
                     val = mobi_half( MPG(x, -1), MPG(x+1, -1) );
                 else if( y == 1 )
-                    val = mobi_half_horz( h, p_dst, idx, x+1, -1 );
+                    val = mobi_half_horz( h, p_dst, ax, ay, size, x+1, -1 );
                 else if( x < size - 1 )
                     val = MPG(x+1, y-2);
                 else if( (y % 2) == 0 )
                     val = mobi_half( MPG(y/2 + size - 1, -1), MPG(y/2 + size, -1) );
                 else
-                    val = mobi_half_horz( h, p_dst, idx, y/2 + size, -1 );
+                    val = mobi_half_horz( h, p_dst, ax, ay, size, y/2 + size, -1 );
                 break;
             default: val = 0x80; break;
             }
@@ -592,6 +601,23 @@ static void mobi_predict_4x4( x264_t *h, pixel *p_dst, int idx, int pmode )
     }
 }
 #undef MPG
+
+/* 4x4 luma: origin from the raster block index. */
+static void mobi_predict_4x4( x264_t *h, pixel *p_dst, int idx, int pmode )
+{
+    mobi_predict_block( h, p_dst,
+                        h->mb.i_mb_x * 16 + block_idx_x[idx] * 4,
+                        h->mb.i_mb_y * 16 + block_idx_y[idx] * 4, 4, pmode );
+}
+
+/* 8x8 luma: idx 0..3 in raster order within the macroblock, matching the order
+ * decode_macroblock() walks its four 8x8 sub-blocks. */
+static void mobi_predict_8x8( x264_t *h, pixel *p_dst, int idx, int pmode )
+{
+    mobi_predict_block( h, p_dst,
+                        h->mb.i_mb_x * 16 + (idx & 1) * 8,
+                        h->mb.i_mb_y * 16 + (idx >> 1) * 8, 8, pmode );
+}
 
 /* Mobiclip chroma 8x8 prediction, matching the decoder's predict_intra(size=8)
  * for the only modes the chroma-mode fix table can emit: 0=V, 1=H, 3=DC.
@@ -887,6 +913,20 @@ static ALWAYS_INLINE void x264_mb_encode_i8x8( x264_t *h, int p, int idx, int i_
             edge = edge_buf;
         }
 
+#if !HIGH_BIT_DEPTH
+        if( h->param.i_mobiclip && p == 0 )
+        {
+            /* Same conversion as the I_4x4 path and as cavlc.c's I_8x8 write
+             * branch (identical tables in both places), so the pixels we
+             * reconstruct here match the mode actually written to the stream. */
+            static const uint8_t x264_intra_to_h264[13] =
+                { 2,0,1,2,2,8,6,5,4,3,2,2,2 };
+            int i_h264_mode = x264_intra_to_h264[ (unsigned)i_mode + 1 < 13 ? i_mode + 1 : 0 ];
+            int mobi_mode = mobi_h264_to_mobiclip_mode[ i_h264_mode < 9 ? i_h264_mode : 8 ];
+            mobi_predict_8x8( h, p_dst, idx, mobi_mode );
+        }
+        else
+#endif
         if( h->mb.b_lossless )
             x264_predict_lossless_8x8( h, p_dst, p, idx, i_mode, edge );
         else
