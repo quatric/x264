@@ -66,4 +66,22 @@ int32_t mobi_cq_decide( mobi_cq_policy_t *policy, int32_t total_frame_count,
  * didn't use the suggested QP verbatim. */
 void mobi_cq_feedback( mobi_cq_policy_t *policy, int32_t qp_used );
 
+/* Same QP math as mobi_cq_decide (boost + round + drift-feedback), but
+ * takes is_keyframe as an INPUT rather than deriving it from intra/inter
+ * cost -- for integration into a host encoder (x264) that already has its
+ * own scene-cut/GOP decision made by the time rate control needs a QP.
+ * Retail's own scene-cut trigger (mods_cq_force_iframe's intra/inter cost
+ * ratio) is deliberately NOT replicated here: x264's SATD-domain lookahead
+ * costs are not the same domain as retail's, so re-deriving the trigger
+ * from x264's costs would risk exactly the kind of cross-domain mixing
+ * mistake already caught once this session (see mobi_ratecost.c's intra4x4
+ * integration notes) -- better to trust x264's own (already-tuned, already
+ * exposed via --i-threshold/-sc_threshold) scene-cut decision and only
+ * port retail's QP-given-keyframe math, which is what's actually novel
+ * here. Equivalent to mobi_cq_decide() when is_keyframe is supplied from
+ * the interval+scene-cut trigger mobi_cq_decide would have computed
+ * itself -- verified by feeding mobi_cq_decide's own is_keyframe output
+ * back through this function and confirming identical QPs. */
+int32_t mobi_cq_qp_for_frame( mobi_cq_policy_t *policy, int32_t total_frame_count, int is_keyframe );
+
 #endif

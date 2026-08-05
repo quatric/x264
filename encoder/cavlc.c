@@ -1213,6 +1213,13 @@ static void encode_p_block(x264_t *h)
 		tmp = bs_pos(s);
 #endif
 		BOOL use8x8 = mobi_use_8x8(h);
+#if !RDO_SKIP_BS
+		if (getenv("MOBI_ENCDBG2"))
+			fprintf(stderr, "[ENC2] MB(%d,%d) type=%d part=%d use8x8=%d sub=(%d,%d,%d,%d)\n",
+				h->mb.i_mb_x * 16, h->mb.i_mb_y * 16, h->mb.i_type, h->mb.i_partition, use8x8,
+				h->mb.i_sub_partition[0], h->mb.i_sub_partition[1],
+				h->mb.i_sub_partition[2], h->mb.i_sub_partition[3]);
+#endif
 		uint8_t mask =
 			(!!h->mb.cache.non_zero_count[x264_scan8[0 * 4]]) |
 			((!!h->mb.cache.non_zero_count[x264_scan8[1 * 4]]) << 1) |
