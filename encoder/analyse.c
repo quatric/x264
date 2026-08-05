@@ -30,6 +30,7 @@
 #include "me.h"
 #include "ratecontrol.h"
 #include "analyse.h"
+#include "mobi_ratecost.h"
 #include "rdo.c"
 
 typedef struct
@@ -901,6 +902,60 @@ static void mb_analyse_intra( x264_t *h, x264_mb_analysis_t *a, int i_satd_inter
                 /* emulate missing topright samples */
                 MPIXEL_X4( &p_dst_by[4 - FDEC_STRIDE] ) = PIXEL_SPLAT_X4( p_dst_by[3 - FDEC_STRIDE] );
 
+#if !HIGH_BIT_DEPTH
+            if( h->param.i_mobiclip )
+            {
+                /* Retail Mobiclip picks its I_4x4 mode by its own SSE+lambda*
+                 * VLC-bits cost (mobi_ratecost.c), not x264's SATD -- shadow
+                 * testing (MOBI_I4X4_LOG, see memory note
+                 * mobiclip-native-mode-decision-port) measured 87% agreement
+                 * with x264's SATD choice on real content, and ~382 avg cost
+                 * gap on the 13% that disagree, so this is a real accuracy
+                 * gain, not a coin flip.  Use retail's cost purely to choose
+                 * the winning mode; report that mode's cost back in SATD
+                 * units afterward so every downstream comparison in this
+                 * function (i_satd_thresh, and critically the P-slice
+                 * intra-vs-inter compare against a SATD-scale inter cost)
+                 * keeps operating on the scale it already assumes -- mixing
+                 * SSE-domain retail cost into that comparison would silently
+                 * bias inter-vs-intra decisions since the two scales aren't
+                 * comparable. */
+                uint8_t s4[16];
+                for( int yy = 0; yy < 4; yy++ )
+                    for( int xx = 0; xx < 4; xx++ )
+                        s4[yy*4+xx] = p_src_by[yy*FENC_STRIDE+xx];
+                int qp = mobi_qp( h, a->i_qp );
+                int is_kf = h->sh.i_type == SLICE_TYPE_I;
+                int retail_best_cost = INT_MAX, retail_best_mode = predict_mode[0];
+                for( const int8_t *sweep = predict_mode; *sweep >= 0; sweep++ )
+                {
+                    int mode = *sweep;
+                    h->predict_4x4[mode]( p_dst_by );
+                    uint8_t p4[16];
+                    for( int yy = 0; yy < 4; yy++ )
+                        for( int xx = 0; xx < 4; xx++ )
+                            p4[yy*4+xx] = p_dst_by[yy*FDEC_STRIDE+xx];
+                    int cost = mobi_rescore_4x4( s4, p4, 4, qp, a->i_lambda, is_kf );
+                    if( cost < retail_best_cost ) { retail_best_cost = cost; retail_best_mode = mode; }
+                }
+                h->predict_4x4[retail_best_mode]( p_dst_by );
+                a->i_predict4x4[idx] = retail_best_mode;
+                i_best = h->pixf.mbcmp[PIXEL_4x4]( p_src_by, FENC_STRIDE, p_dst_by, FDEC_STRIDE );
+                i_cost += i_best + 3 * lambda;
+                h->mb.cache.intra4x4_pred_mode[x264_scan8[idx]] = retail_best_mode;
+                /* Mobiclip always forces I_4x4 regardless of i_cost (see
+                 * x264_macroblock_analyse); never early-terminate this scan
+                 * on the i_satd_thresh check below, or a->i_satd_i4x4 falls
+                 * back to COST_MAX for the rest of the macroblock, which the
+                 * P-slice compare would then wrongly read as "intra is
+                 * infinitely expensive". `idx==15` still needs to fall
+                 * through to the loop's normal post-scan bookkeeping below,
+                 * exactly like the non-mobiclip paths' own `break` does. */
+                if( idx == 15 )
+                    break;
+                continue;
+            }
+#endif
             if( h->pixf.intra_mbcmp_x9_4x4 && predict_mode[8] >= 0 )
             {
                 /* No shortcuts here. The SSSE3 implementation of intra_mbcmp_x9 is fast enough. */
@@ -3070,6 +3125,80 @@ skip_analysis:
                     M32( h->mb.mvr[0][i][h->mb.i_mb_xy] ) = 0;
                 return;
             }
+
+#if !HIGH_BIT_DEPTH
+            /* Re-score a small, always-valid P16x16 MV candidate set
+             * {x264's found MV, zero MV, the MV predictor} by retail
+             * Mobiclip's own SAD-rate cost model, and use retail's cost to
+             * pick which one wins -- shadow measurement upgraded to a real
+             * decision, same session (see memory note
+             * mobiclip-native-mode-decision-port for the 95.94%
+             * "found MV beats zero" sanity-check number that preceded this).
+             *
+             * This is NOT a real motion search: it only chooses among three
+             * candidates x264 already computed cheaply (found/zero/mvp), it
+             * does not explore new MV territory the way the intra4x4 sweep
+             * explored all 9 real prediction modes. A full retail-cost-
+             * driven ME port (re-scoring every hex/diamond search step) is
+             * the larger remaining phase this does not attempt.
+             *
+             * Exactly like the intra4x4 change: retail's SSE-domain cost is
+             * used ONLY to pick the winning candidate. cost/cost_mv are then
+             * recomputed in x264's native SATD+lambda*bits domain (mbcmp +
+             * the p_cost_mv[mv-mvp] formula from encoder/me.c) so every
+             * downstream comparison (P8x8/P16x8/P8x16 thresholds, and later
+             * x264_me_refine_qpel, which still runs afterward and treats
+             * this only as a refinement starting point) keeps operating on
+             * the scale it already assumes. */
+            if( h->param.i_mobiclip )
+            {
+                int qp = mobi_qp( h, h->mb.i_qp );
+                int16_t cand_mv[3][2] = {
+                    { analysis.l0.me16x16.mv[0], analysis.l0.me16x16.mv[1] },
+                    { 0, 0 },
+                    { analysis.l0.me16x16.mvp[0], analysis.l0.me16x16.mvp[1] },
+                };
+                int best_retail = INT_MAX, best_idx = 0;
+                for( int c = 0; c < 3; c++ )
+                {
+                    int mvx = cand_mv[c][0], mvy = cand_mv[c][1];
+                    if( mvx < h->mb.mv_min_spel[0] || mvx > h->mb.mv_max_spel[0] ||
+                        mvy < h->mb.mv_min_spel[1] || mvy > h->mb.mv_max_spel[1] )
+                        continue;
+                    ALIGNED_ARRAY_16( pixel, pred_buf, [16*16] );
+                    h->mc.mc_luma( pred_buf, 16, analysis.l0.me16x16.p_fref, analysis.l0.me16x16.i_stride[0],
+                                   mvx, mvy, 16, 16, analysis.l0.me16x16.weight );
+                    int total = 0;
+                    for( int b8 = 0; b8 < 4; b8++ )
+                    {
+                        int ox = (b8&1)*8, oy = (b8>>1)*8;
+                        uint8_t s8[64], p8[64];
+                        for( int yy = 0; yy < 8; yy++ )
+                            for( int xx = 0; xx < 8; xx++ )
+                            {
+                                s8[yy*8+xx] = h->mb.pic.p_fenc[0][(oy+yy)*FENC_STRIDE + ox+xx];
+                                p8[yy*8+xx] = pred_buf[(oy+yy)*16 + ox+xx];
+                            }
+                        total += mobi_rescore_8x8( s8, p8, 8, qp, analysis.i_lambda, 0 );
+                    }
+                    if( total < best_retail ) { best_retail = total; best_idx = c; }
+                }
+                if( best_idx != 0 )
+                {
+                    analysis.l0.me16x16.mv[0] = cand_mv[best_idx][0];
+                    analysis.l0.me16x16.mv[1] = cand_mv[best_idx][1];
+                    ALIGNED_ARRAY_16( pixel, pred_buf, [16*16] );
+                    h->mc.mc_luma( pred_buf, 16, analysis.l0.me16x16.p_fref, analysis.l0.me16x16.i_stride[0],
+                                   analysis.l0.me16x16.mv[0], analysis.l0.me16x16.mv[1], 16, 16, analysis.l0.me16x16.weight );
+                    int satd = h->pixf.mbcmp[PIXEL_16x16]( h->mb.pic.p_fenc[0], FENC_STRIDE, pred_buf, 16 );
+                    analysis.l0.me16x16.cost_mv = analysis.l0.me16x16.p_cost_mv[ analysis.l0.me16x16.mv[0] - analysis.l0.me16x16.mvp[0] ]
+                                                 + analysis.l0.me16x16.p_cost_mv[ analysis.l0.me16x16.mv[1] - analysis.l0.me16x16.mvp[1] ];
+                    analysis.l0.me16x16.cost = satd + analysis.l0.me16x16.cost_mv + analysis.l0.me16x16.i_ref_cost;
+                    CP32( h->mb.mvr[0][analysis.l0.me16x16.i_ref][h->mb.i_mb_xy], analysis.l0.me16x16.mv );
+                    CP32( analysis.l0.mvc[analysis.l0.me16x16.i_ref][0], analysis.l0.me16x16.mv );
+                }
+            }
+#endif
 
             if( flags & X264_ANALYSE_PSUB16x16 )
             {
