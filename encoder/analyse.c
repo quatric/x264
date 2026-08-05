@@ -542,6 +542,37 @@ static const int8_t i4x4_mode_available[2][5][10] =
     }
 };
 
+/* Mobiclip neighbour availability differs from H.264's.  x264's mode lists are
+ * built from H.264 semantics, but the encoder reconstructs with the decoder's
+ * predict_intra(), and the two mode spaces are related by the composed map in
+ * macroblock.h.  Under that map I_PRED_4x4_VL becomes Mobiclip mode 7, whose
+ * (x==0,y==0) case reads the above-left pixel -- so VL is only legal when
+ * TOPLEFT is available, while H.264 lists it as a top-only mode.  Picking it at
+ * the frame's left edge made the read clamp onto the block's own not-yet-written
+ * pixel, and encoder and decoder predicted from different data.  These rows are
+ * the standard ones with VL removed; row 4 (all neighbours present) is unchanged
+ * because every mode is legal there. */
+static const int8_t mobi_top_only_mode_available[10] =
+    { I_PRED_4x4_DC_TOP, I_PRED_4x4_V, I_PRED_4x4_DDL, -1, -1, -1, -1, -1, -1, -1 };
+static const int8_t mobi_top_left_mode_available[10] =
+    { I_PRED_4x4_DC, I_PRED_4x4_H, I_PRED_4x4_V, I_PRED_4x4_DDL, I_PRED_4x4_HU, -1, -1, -1, -1, -1 };
+
+/* Substitute the Mobiclip-legal list for the two rows that would otherwise
+ * offer VL without a topleft neighbour. */
+static ALWAYS_INLINE const int8_t *mobi_filter_mode_available( const int8_t *list, int idx,
+                                                               int avoid_topright, int mobiclip )
+{
+    /* The avoid_topright rows are already restricted to left-ish modes and never
+     * offer VL, so leave them alone rather than widening them back out. */
+    if( !mobiclip || avoid_topright )
+        return list;
+    if( idx == (MB_TOP) )
+        return mobi_top_only_mode_available;
+    if( idx == (MB_TOP|MB_LEFT) )
+        return mobi_top_left_mode_available;
+    return list;
+}
+
 static ALWAYS_INLINE const int8_t *predict_16x16_mode_available( int i_neighbour )
 {
     int idx = i_neighbour & (MB_TOP|MB_LEFT|MB_TOPLEFT);
@@ -556,20 +587,20 @@ static ALWAYS_INLINE const int8_t *predict_chroma_mode_available( int i_neighbou
     return chroma_mode_available[idx];
 }
 
-static ALWAYS_INLINE const int8_t *predict_8x8_mode_available( int force_intra, int i_neighbour, int i )
+static ALWAYS_INLINE const int8_t *predict_8x8_mode_available( int force_intra, int i_neighbour, int i, int mobiclip )
 {
     int avoid_topright = force_intra && (i&1);
     int idx = i_neighbour & (MB_TOP|MB_LEFT|MB_TOPLEFT);
     idx = (idx == (MB_TOP|MB_LEFT|MB_TOPLEFT)) ? 4 : idx & (MB_TOP|MB_LEFT);
-    return i8x8_mode_available[avoid_topright][idx];
+    return mobi_filter_mode_available( i8x8_mode_available[avoid_topright][idx], idx, avoid_topright, mobiclip );
 }
 
-static ALWAYS_INLINE const int8_t *predict_4x4_mode_available( int force_intra, int i_neighbour, int i )
+static ALWAYS_INLINE const int8_t *predict_4x4_mode_available( int force_intra, int i_neighbour, int i, int mobiclip )
 {
     int avoid_topright = force_intra && ((i&5) == 5);
     int idx = i_neighbour & (MB_TOP|MB_LEFT|MB_TOPLEFT);
     idx = (idx == (MB_TOP|MB_LEFT|MB_TOPLEFT)) ? 4 : idx & (MB_TOP|MB_LEFT);
-    return i4x4_mode_available[avoid_topright][idx];
+    return mobi_filter_mode_available( i4x4_mode_available[avoid_topright][idx], idx, avoid_topright, mobiclip );
 }
 
 /* For trellis=2, we need to do this for both sizes of DCT, for trellis=1 we only need to use it on the chosen mode. */
@@ -780,7 +811,7 @@ static void mb_analyse_intra( x264_t *h, x264_mb_analysis_t *a, int i_satd_inter
             int i_best = COST_MAX;
             int i_pred_mode = x264_mb_predict_intra4x4_mode( h, 4*idx );
 
-            const int8_t *predict_mode = predict_8x8_mode_available( a->b_avoid_topright, h->mb.i_neighbour8[idx], idx );
+            const int8_t *predict_mode = predict_8x8_mode_available( a->b_avoid_topright, h->mb.i_neighbour8[idx], idx, h->param.i_mobiclip );
             h->predict_8x8_filter( p_dst_by, edge, h->mb.i_neighbour8[idx], ALL_NEIGHBORS );
 
             if( h->pixf.intra_mbcmp_x9_8x8 && predict_mode[8] >= 0 )
@@ -896,7 +927,7 @@ static void mb_analyse_intra( x264_t *h, x264_mb_analysis_t *a, int i_satd_inter
             int i_best = COST_MAX;
             int i_pred_mode = x264_mb_predict_intra4x4_mode( h, idx );
 
-            const int8_t *predict_mode = predict_4x4_mode_available( a->b_avoid_topright, h->mb.i_neighbour4[idx], idx );
+            const int8_t *predict_mode = predict_4x4_mode_available( a->b_avoid_topright, h->mb.i_neighbour4[idx], idx, h->param.i_mobiclip );
 
             if( (h->mb.i_neighbour4[idx] & (MB_TOPRIGHT|MB_TOP)) == MB_TOP )
                 /* emulate missing topright samples */
@@ -1163,7 +1194,7 @@ static void intra_rd_refine( x264_t *h, x264_mb_analysis_t *a )
                              CHROMA_FORMAT ? h->mb.pic.p_fdec[2] + block_idx_xy_fdec[idx] : NULL};
             i_best = COST_MAX64;
 
-            const int8_t *predict_mode = predict_4x4_mode_available( a->b_avoid_topright, h->mb.i_neighbour4[idx], idx );
+            const int8_t *predict_mode = predict_4x4_mode_available( a->b_avoid_topright, h->mb.i_neighbour4[idx], idx, h->param.i_mobiclip );
 
             if( (h->mb.i_neighbour4[idx] & (MB_TOPRIGHT|MB_TOP)) == MB_TOP )
                 for( int p = 0; p < plane_count; p++ )
@@ -1221,7 +1252,7 @@ static void intra_rd_refine( x264_t *h, x264_mb_analysis_t *a )
 
             i_best = COST_MAX64;
 
-            const int8_t *predict_mode = predict_8x8_mode_available( a->b_avoid_topright, h->mb.i_neighbour8[idx], idx );
+            const int8_t *predict_mode = predict_8x8_mode_available( a->b_avoid_topright, h->mb.i_neighbour8[idx], idx, h->param.i_mobiclip );
             for( int p = 0; p < plane_count; p++ )
                 h->predict_8x8_filter( dst[p], edge[p], h->mb.i_neighbour8[idx], ALL_NEIGHBORS );
 

@@ -421,14 +421,18 @@ do\
  * decoder's pget() boundary-clamping rules so the encoder reconstructs the
  * same pixels the decoder will.  Modes: 0=V 1=H 2=plane(unused) 3=DC 4..8=dir.
  * ------------------------------------------------------------------------ */
-/* I_8x8 intra macroblocks for Mobiclip are opt-in while the path earns
- * confidence.  Defined outside the !HIGH_BIT_DEPTH guard because
- * analyse.c compiles for both bit depths.  Note: it was force-disabled for a long time and the ban is recorded as
- * having desynced whole frames when it regressed. */
+/* I_8x8 intra macroblocks for Mobiclip.  These were force-disabled for a long
+ * time because the path desynced whole frames; the cause was a missing 8x8
+ * Mobiclip predictor plus H.264 mode lists offering VL where the composed mode
+ * map needs an above-left neighbour.  With both fixed the path is bit-exact
+ * against the decoder across every bitexact.sh case, so it is on by default.
+ * Set MOBI_I8X8=0 to fall back to I_4x4-only if a stream ever needs bisecting.
+ * Defined outside the !HIGH_BIT_DEPTH guard because analyse.c compiles for both
+ * bit depths. */
 static ALWAYS_INLINE int mobi_i8x8_enabled( void )
 {
     const char *e = getenv( "MOBI_I8X8" );
-    return e && atoi( e );
+    return !e || atoi( e );
 }
 
 #if !HIGH_BIT_DEPTH
