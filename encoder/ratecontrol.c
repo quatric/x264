@@ -32,6 +32,7 @@
 #include "common/common.h"
 #include "ratecontrol.h"
 #include "me.h"
+#include "mobi_ratecontrol.h"
 
 typedef struct
 {
@@ -82,6 +83,13 @@ struct x264_ratecontrol_t
     double qcompress;
     int nmb;                    /* number of macroblocks in a frame */
     int qp_constant[3];
+
+    /* Retail Mobiclip's CQ policy (mobi_ratecontrol.c), active in place of
+     * the qp_constant[] CQP path above when i_mobiclip is set and no
+     * bitrate target was requested (retail's own "no peak limiter" CQ
+     * mode -- ABR/2pass stay x264's own, unrelated to this policy). */
+    int mobi_cq_active;
+    mobi_cq_policy_t mobi_cq;
 
     /* current frame */
     ratecontrol_entry_t *rce;
@@ -752,6 +760,23 @@ int x264_ratecontrol_new( x264_t *h )
 
     rc->b_abr = h->param.rc.i_rc_method != X264_RC_CQP && !h->param.rc.b_stat_read;
     rc->b_2pass = h->param.rc.i_rc_method == X264_RC_ABR && h->param.rc.b_stat_read;
+
+    /* Retail Mobiclip's exact CQ policy (mobi_ratecontrol.c) only replaces
+     * plain CQP -- ABR/2pass stay x264's own rate control, which is a
+     * different problem retail's other five RC policies (not yet ported)
+     * would address, not this one. Opt-in only (i_mobi_cq_iboost/
+     * ithreshold >= 0): activating it by default under -mobiclip would
+     * silently change existing CQP behaviour for anyone not asking for it. */
+    rc->mobi_cq_active = h->param.i_mobiclip && !rc->b_abr && !rc->b_2pass &&
+        (h->param.i_mobi_cq_iboost >= 0 || h->param.i_mobi_cq_ithreshold >= 0);
+    if( rc->mobi_cq_active )
+    {
+        int boost = h->param.i_mobi_cq_iboost >= 0 ? h->param.i_mobi_cq_iboost : 40;
+        int threshold = h->param.i_mobi_cq_ithreshold >= 0 ? h->param.i_mobi_cq_ithreshold : 90;
+        int interval = h->param.i_mobi_cq_interval >= 0 ? h->param.i_mobi_cq_interval : h->param.i_keyint_max;
+        int32_t quantizer_100 = h->param.rc.i_qp_constant * 100;
+        mobi_cq_policy_init( &rc->mobi_cq, quantizer_100, boost, threshold, interval );
+    }
 
     /* FIXME: use integers */
     if( h->param.i_fps_num > 0 && h->param.i_fps_den > 0 )
@@ -1503,6 +1528,15 @@ void x264_ratecontrol_start( x264_t *h, int i_force_qp, int overhead )
         rce->new_qscale = rate_estimate_qscale( h );
         q = qscale2qp( rce->new_qscale );
     }
+    else if( rc->mobi_cq_active && i_force_qp == X264_QP_AUTO )
+    {
+        /* Retail's exact CQ policy math (mobi_ratecontrol.c), given
+         * whether this frame is a keyframe from x264's own frametype/
+         * scene-cut decision -- see mobi_cq_qp_for_frame's header comment
+         * for why retail's own scene-cut trigger isn't re-derived here. */
+        int is_keyframe = h->sh.i_type == SLICE_TYPE_I;
+        q = mobi_cq_qp_for_frame( &rc->mobi_cq, h->fenc->i_frame, is_keyframe );
+    }
     else /* CQP */
     {
         if( h->sh.i_type == SLICE_TYPE_B && h->fdec->b_kept_as_ref )
@@ -1522,6 +1556,13 @@ void x264_ratecontrol_start( x264_t *h, int i_force_qp, int overhead )
         q = i_force_qp - 1;
 
     q = x264_clip3f( q, h->param.rc.i_qp_min, h->param.rc.i_qp_max );
+
+    /* CQP has no further per-MB/VBV adjustment overriding the frame-level
+     * qp, so this is the actual value that will be used -- feed it back
+     * to the drift accumulator now, matching retail's own output_ready
+     * timing (called once the frame's qp is committed). */
+    if( rc->mobi_cq_active && i_force_qp == X264_QP_AUTO )
+        mobi_cq_feedback( &rc->mobi_cq, (int32_t)( q + 0.5f ) );
 
     rc->qpa_rc = rc->qpa_rc_prev =
     rc->qpa_aq = rc->qpa_aq_prev = 0;
