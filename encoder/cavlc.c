@@ -808,12 +808,44 @@ static void encode_i_block(x264_t *h)
 	int cf = h->param.b_moflex ? 0 : 1; /* chroma idx written first  */
 	int cs = h->param.b_moflex ? 1 : 0; /* chroma idx written second */
 
-	/* Always use per-block prediction mode encoding.  The equalPredict
-	 * shortcut (single 3-bit mode for whole MB) bypasses pre[] updates and
-	 * uses x264's 8x8 prediction which differs from the decoder's per-4x4
-	 * intra prediction in boundary behaviour. */
+	/* Mobiclip "mode 6" (decoder: predict==0) signals ONE prediction mode for
+	 * the whole macroblock; "mode 7" (predict==1) signals a mode per block.
+	 * Mode 6 is not H.264 I_16x16 -- the decoder applies the single mode to
+	 * each 8x8 (or 4x4) sub-block independently, each predicting from its own
+	 * reconstructed neighbours (mobiclip.c decode_macroblock/process_block).
+	 * So whenever every sub-block already carries the same mode, the two forms
+	 * reconstruct identically and mode 6 is purely a cheaper way to say it:
+	 * one 3-bit mode instead of one code per block.  Retail chooses between
+	 * the two by cost (mods_encoder.c mods_try_intra prices both, including a
+	 * rate_val_table[]*lambda penalty); this covers the case where the choice
+	 * costs nothing to make.
+	 *
+	 * Two things make switching form safe without touching reconstruction:
+	 * mode 6 skips get_prediction() in the decoder, so it performs no pre[]
+	 * update -- and the encoder's matching path skips mobi_write_pred_mode(),
+	 * so neither side updates predictor state and the two stay in lockstep for
+	 * later macroblocks.  And luma never maps to mobiclip mode 2 (plane),
+	 * whose whole-MB 16x16 prediction would NOT match per-8x8 reconstruction:
+	 * h264_to_mobiclip_mode[] contains no 2. */
 	BOOL equalPredict = FALSE;
 	int equalMode = mobi_intra_to_h264[(h->mb.cache.intra4x4_pred_mode[x264_scan8[0]])+1];
+	if (h->param.i_mobiclip)
+	{
+		int m0 = h->mb.cache.intra4x4_pred_mode[x264_scan8[0]];
+		equalPredict = TRUE;
+		if (h->mb.b_transform_8x8)
+		{
+			for (int i8 = 1; i8 < 4; i8++)
+				if (h->mb.cache.intra4x4_pred_mode[x264_scan8[i8 * 4]] != m0)
+				{ equalPredict = FALSE; break; }
+		}
+		else
+		{
+			for (int i4 = 1; i4 < 16; i4++)
+				if (h->mb.cache.intra4x4_pred_mode[x264_scan8[i4]] != m0)
+				{ equalPredict = FALSE; break; }
+		}
+	}
 	if (h->sh.i_type == SLICE_TYPE_I)
 	{
 		bs_write1(s, !equalPredict);
