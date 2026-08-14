@@ -1,4 +1,5 @@
 #include <stdint.h>
+#include "mobi_ratecost_tables.h"
 
 const uint32_t mods_scan_8x8[64] = {
     0, 8, 1, 2, 9, 16, 24, 17,
