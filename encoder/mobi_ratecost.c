@@ -6,6 +6,7 @@
  * verification summary and exact quant-parameter formulas.
  *****************************************************************************/
 #include "mobi_ratecost.h"
+#include "mobi_ratecost_tables.h"
 #include "common/common.h"
 #include "macroblock.h"
 #include <string.h>
@@ -13,13 +14,7 @@
 /* Tables in mobi_ratecost_tables.c: mods_scan_4x4/8x8, mods_sad_thresh_4x4/8x8,
  * mods_vlc_mid_8x8, mods_vlc_last_8x8 -- copied verbatim from 43_2's
  * tests/vlc_tables.c rather than retyped, to avoid transcription risk on the
- * two 32768-entry cost tables. */
-extern const uint32_t mods_scan_8x8[64];
-extern const uint32_t mods_sad_thresh_8x8[52];
-extern const uint8_t mods_vlc_mid_8x8[32768];
-extern const uint8_t mods_vlc_last_8x8[32768];
-extern const uint32_t mods_scan_4x4[15];
-extern const uint32_t mods_sad_thresh_4x4[52];
+ * two 32768-entry cost tables. Declared in mobi_ratecost_tables.h. */
 
 /* The SAD-rate cost kernel's own mf/iq tables (retail DLL addresses
  * 0x1009C940/0x1009CD00 for 4x4, 0x1009C640/0x1009CA00 for 8x8, confirmed by

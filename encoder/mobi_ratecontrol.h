@@ -32,6 +32,16 @@
 #define X264_MOBI_RATECONTROL_H
 
 #include <stdint.h>
+#include "common/common.h"
+
+/* Compiled twice (once per BIT_DEPTH) like the rest of SRCS_X even though
+ * the policy math itself doesn't vary with pixel depth -- needs the same
+ * x264_template() renaming as mobi_ratecost.h or the 8-bit/10-bit objects
+ * collide at link time with duplicate symbols. */
+#define mobi_cq_policy_init  x264_template(mobi_cq_policy_init)
+#define mobi_cq_decide       x264_template(mobi_cq_decide)
+#define mobi_cq_feedback     x264_template(mobi_cq_feedback)
+#define mobi_cq_qp_for_frame x264_template(mobi_cq_qp_for_frame)
 
 typedef struct
 {

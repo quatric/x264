@@ -24,6 +24,16 @@
 #define X264_MOBI_RATECOST_H
 
 #include <stdint.h>
+#include "common/common.h"
+
+/* Every symbol here is compiled twice (once per BIT_DEPTH, like the rest of
+ * x264) even though the logic itself doesn't vary with pixel depth -- so it
+ * needs the same x264_template() renaming as everything else in SRCS_X, or
+ * the 8-bit and 10-bit objects collide at link time with duplicate symbols. */
+#define mobi_sad_rate_4x4_core x264_template(mobi_sad_rate_4x4_core)
+#define mobi_sad_rate_8x8_core x264_template(mobi_sad_rate_8x8_core)
+#define mobi_rescore_4x4       x264_template(mobi_rescore_4x4)
+#define mobi_rescore_8x8       x264_template(mobi_rescore_8x8)
 
 /* mf/iq are the flat per-QP forward-MF / inverse-quant tables (16 entries
  * for 4x4, 64 for 8x8) at the exact retail DLL addresses:
