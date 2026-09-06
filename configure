@@ -56,6 +56,7 @@ External library support:
   --disable-ffms           disable ffmpegsource support
   --disable-gpac           disable gpac support
   --disable-lsmash         disable lsmash support
+  --disable-sentry         disable sentry support
 
 EOF
 exit 1
@@ -386,6 +387,7 @@ lavf="auto"
 ffms="auto"
 gpac="auto"
 lsmash="auto"
+sentry="auto"
 mp4="no"
 gpl="yes"
 thread="auto"
@@ -422,7 +424,7 @@ NL="
 
 # list of all preprocessor HAVE values we can define
 CONFIG_HAVE="MALLOC_H ALTIVEC ALTIVEC_H MMX ARMV6 ARMV6T2 NEON AARCH64 BEOSTHREAD POSIXTHREAD WIN32THREAD THREAD LOG2F SWSCALE \
-             LAVF FFMS GPAC AVS GPL VECTOREXT INTERLACED CPU_COUNT OPENCL THP LSMASH X86_INLINE_ASM AS_FUNC INTEL_DISPATCHER \
+             LAVF FFMS GPAC SENTRY AVS GPL VECTOREXT INTERLACED CPU_COUNT OPENCL THP LSMASH X86_INLINE_ASM AS_FUNC INTEL_DISPATCHER \
              MSA LSX MMAP WINRT VSX ARM_INLINE_ASM STRTOK_R CLOCK_GETTIME BITDEPTH8 BITDEPTH10 ELF_AUX_INFO GETAUXVAL \
              SYSCONF SYNC_FETCH_AND_ADD \
              DOTPROD I8MM SVE SVE2 \
@@ -490,6 +492,9 @@ for opt do
             ;;
         --disable-lsmash)
             lsmash="no"
+            ;;
+        --disable-sentry)
+            sentry="no"
             ;;
         --disable-gpl)
             gpl="no"
@@ -1386,6 +1391,32 @@ elif [ "$gpac" = "yes" ] ; then
     define HAVE_GPAC
 fi
 
+if [ "$sentry" = "auto" ] ; then
+    sentry="no"
+    if pkg_check sentry ; then
+        SENTRY_LIBS="$($PKGCONFIG --libs sentry)"
+        SENTRY_CFLAGS="$($PKGCONFIG --cflags sentry)"
+    fi
+    if [ -z "$SENTRY_LIBS" ] && [ -d /opt/homebrew/include ] && cc_check "sentry.h" "-I/opt/homebrew/include -L/opt/homebrew/lib -lsentry" "sentry_init(0);" ; then
+        SENTRY_CFLAGS="-I/opt/homebrew/include"
+        SENTRY_LIBS="-L/opt/homebrew/lib -lsentry"
+    elif [ -z "$SENTRY_LIBS" ] && [ -d /usr/local/include ] && cc_check "sentry.h" "-I/usr/local/include -L/usr/local/lib -lsentry" "sentry_init(0);" ; then
+        SENTRY_CFLAGS="-I/usr/local/include"
+        SENTRY_LIBS="-L/usr/local/lib -lsentry"
+    elif [ -z "$SENTRY_LIBS" ] && cc_check "sentry.h" "-lsentry" "sentry_init(0);" ; then
+        SENTRY_LIBS="-lsentry"
+    fi
+    if [ -n "$SENTRY_LIBS" ] && cc_check "sentry.h" "$SENTRY_CFLAGS $SENTRY_LIBS" "sentry_init(0);" ; then
+        sentry="yes"
+    fi
+fi
+
+if [ "$sentry" = "yes" ] ; then
+    LDFLAGSCLI="$SENTRY_LIBS $LDFLAGSCLI"
+    CFLAGSCLI="$CFLAGSCLI $SENTRY_CFLAGS"
+    define HAVE_SENTRY
+fi
+
 if [ "$avs" = "auto" ] ; then
     avs="no"
     # cygwin can use avisynth if it can use LoadLibrary
@@ -1748,6 +1779,7 @@ avs:            $avs
 lavf:           $lavf
 ffms:           $ffms
 mp4:            $mp4
+sentry:         $sentry
 gpl:            $gpl
 thread:         $thread
 opencl:         $opencl

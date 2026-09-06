@@ -49,3 +49,5 @@ dataDec.txt
 log.dec
 common/oclobj.h
 x264_lookahead.clbin
+tools/checkasm-aarch64.S
+.sentry-native

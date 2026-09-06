@@ -77,6 +77,10 @@
 #include <lsmash.h>
 #endif
 
+#if HAVE_SENTRY
+#include <sentry.h>
+#endif
+
 #ifdef _WIN32
 #define CONSOLE_TITLE_SIZE 200
 static wchar_t org_console_title[CONSOLE_TITLE_SIZE] = L"";
@@ -329,6 +333,9 @@ static void print_version_info( void )
 #if HAVE_LSMASH
     printf( "(lsmash %d.%d.%d)\n", LSMASH_VERSION_MAJOR, LSMASH_VERSION_MINOR, LSMASH_VERSION_MICRO );
 #endif
+#if HAVE_SENTRY
+    printf( "(sentry-native)\n" );
+#endif
     printf( "built on " __DATE__ ", " );
 #ifdef __INTEL_COMPILER
     printf( "intel: %.2f (%d)\n", __INTEL_COMPILER / 100.f, __INTEL_COMPILER_BUILD_DATE );
@@ -361,8 +368,35 @@ static void print_version_info( void )
 
 REALIGN_STACK int main( int argc, char **argv )
 {
+#if HAVE_SENTRY
+    sentry_options_t *sentry_opts = sentry_options_new();
+    sentry_options_set_dsn( sentry_opts, "https://f2756473730a19269c4e0d2a3b3f6525@o107347.ingest.us.sentry.io/4512040248803328" );
+    sentry_options_set_database_path( sentry_opts, ".sentry-native" );
+#ifdef X264_POINTVER
+    sentry_options_set_release( sentry_opts, "x264@" X264_POINTVER );
+#else
+    sentry_options_set_release( sentry_opts, "x264@0.165.x" );
+#endif
+    sentry_options_set_debug( sentry_opts, 1 );
+    if( access( "/opt/homebrew/bin/crashpad_handler", X_OK ) == 0 )
+        sentry_options_set_handler_path( sentry_opts, "/opt/homebrew/bin/crashpad_handler" );
+    else if( access( "/usr/local/bin/crashpad_handler", X_OK ) == 0 )
+        sentry_options_set_handler_path( sentry_opts, "/usr/local/bin/crashpad_handler" );
+    sentry_init( sentry_opts );
+    sentry_capture_event( sentry_value_new_message_event(
+        SENTRY_LEVEL_INFO,
+        "custom",
+        "It works!"
+    ) );
+#endif
+
     if( argc == 4 && !strcmp( argv[1], "--autocomplete" ) )
+    {
+#if HAVE_SENTRY
+        sentry_close();
+#endif
         return x264_cli_autocomplete( argv[2], argv[3] );
+    }
 
     x264_param_t param;
     cli_opt_t opt = {0};
@@ -411,6 +445,10 @@ REALIGN_STACK int main( int argc, char **argv )
 #ifdef _WIN32
     SetConsoleTitleW( org_console_title );
     free( argv );
+#endif
+
+#if HAVE_SENTRY
+    sentry_close();
 #endif
 
     return ret;
@@ -1463,15 +1501,27 @@ static int parse( int argc, char **argv, x264_param_t *param, cli_opt_t *opt )
         {
             case 'h':
                 help( &defaults, 0 );
+#if HAVE_SENTRY
+                sentry_close();
+#endif
                 exit(0);
             case OPT_LONGHELP:
                 help( &defaults, 1 );
+#if HAVE_SENTRY
+                sentry_close();
+#endif
                 exit(0);
             case OPT_FULLHELP:
                 help( &defaults, 2 );
+#if HAVE_SENTRY
+                sentry_close();
+#endif
                 exit(0);
             case 'V':
                 print_version_info();
+#if HAVE_SENTRY
+                sentry_close();
+#endif
                 exit(0);
             case OPT_FRAMES:
                 param->i_frame_total = X264_MAX( atoi( optarg ), 0 );
