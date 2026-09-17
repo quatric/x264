@@ -1394,7 +1394,7 @@ void x264_macroblock_write_cavlc( x264_t *h )
 #endif
 
 #if !RDO_SKIP_BS
-    /*if( i_mb_type == I_PCM )
+    if( i_mb_type == I_PCM )
     {
         static const uint8_t i_offsets[3] = {5,23,0};
         uint8_t *p_start = s->p_start;
@@ -1418,7 +1418,7 @@ void x264_macroblock_write_cavlc( x264_t *h )
 
         h->stat.frame.i_tex_bits += bs_pos(s) - i_mb_pos_tex;
         return;
-    }*/
+    }
 #endif
 	if (h->param.i_mobiclip) {
 		/* Under RDO this runs as a trial encode purely to count bits, so every

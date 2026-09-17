@@ -783,6 +783,28 @@ static ALWAYS_INLINE void x264_mb_encode_i4x4( x264_t *h, int p, int idx, int i_
 
     nz = x264_quant_4x4( h, dct4x4, i_qp, ctx_cat_plane[DCT_LUMA_4x4][p], 1, p, idx );
     h->mb.cache.non_zero_count[x264_scan8[p*16+idx]] = nz;
+
+    if( !h->param.i_mobiclip )
+    {
+        /* Standard H.264: x264's own scan, dequant and inverse transform.
+         * i_cbp_luma MUST be set here -- the CAVLC writer emits a block's
+         * coefficients only for the 8x8 groups flagged in the CBP, so leaving
+         * it clear writes a "no luma residual" CBP while the nnz cache still
+         * claims coefficients.  The decoder then predicts total_coeff from a
+         * different nC than the encoder did and the slice desyncs a few
+         * macroblocks later ("negative number of zero coeffs", "cbp too
+         * large", bogus sub_mb_type/skip runs).  Mobiclip sets its own CBP
+         * around this call, so it is deliberately left out of that path. */
+        if( nz )
+        {
+            h->mb.i_cbp_luma |= 1<<(idx>>2);
+            h->zigzagf.scan_4x4( h->dct.luma4x4[p*16+idx], dct4x4 );
+            h->quantf.dequant_4x4( dct4x4, h->dequant4_mf[p?CQM_4IC:CQM_4IY], i_qp );
+            h->dctf.add4x4_idct( p_dst, dct4x4 );
+        }
+        return;
+    }
+
 #if !HIGH_BIT_DEPTH
     /* Always write luma4x4 in Mobiclip mode to clear stale analysis data. */
     if( h->param.i_mobiclip && p == 0 )

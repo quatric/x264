@@ -857,20 +857,20 @@ static ALWAYS_INLINE void macroblock_encode_internal( x264_t *h, int plane_count
         macroblock_encode_skip( h );
         return;
     }
-    /*if( h->mb.i_type == B_SKIP )
+    if( h->mb.i_type == B_SKIP )
     {
-        /* don't do bskip motion compensation if it was already done in macroblock_analyse /
+        /* don't do bskip motion compensation if it was already done in macroblock_analyse */
         if( !h->mb.b_skip_mc )
             x264_mb_mc( h );
         macroblock_encode_skip( h );
         return;
-    }*/
+    }
 
     if( h->mb.i_type == I_16x16 )
     {
         h->mb.b_transform_8x8 = 0;
 
-        for( int p = 0; p < plane_count; p++, i_qp = h->mb.i_qp )
+        for( int p = 0; p < plane_count; p++, i_qp = h->param.i_mobiclip ? h->mb.i_qp : h->mb.i_chroma_qp )
             mb_encode_i16x16( h, p, i_qp );
     }
     else if( h->mb.i_type == I_8x8 )
@@ -889,7 +889,7 @@ static ALWAYS_INLINE void macroblock_encode_internal( x264_t *h, int plane_count
             if( h->mb.i_skip_intra == 2 )
                 h->mc.memcpy_aligned( h->dct.luma8x8, h->mb.pic.i8x8_dct_buf, sizeof(h->mb.pic.i8x8_dct_buf) );
         }
-        for( int p = 0; p < plane_count; p++, i_qp = h->mb.i_qp )
+        for( int p = 0; p < plane_count; p++, i_qp = h->param.i_mobiclip ? h->mb.i_qp : h->mb.i_chroma_qp )
         {
             for( int i = (p == 0 && h->mb.i_skip_intra) ? 3 : 0; i < 4; i++ )
             {
@@ -930,7 +930,7 @@ static ALWAYS_INLINE void macroblock_encode_internal( x264_t *h, int plane_count
             if( h->mb.i_skip_intra == 2 )
                 h->mc.memcpy_aligned( h->dct.luma4x4, h->mb.pic.i4x4_dct_buf, sizeof(h->mb.pic.i4x4_dct_buf) );
         }
-        for( int p = 0; p < plane_count; p++, i_qp = h->mb.i_qp )
+        for( int p = 0; p < plane_count; p++, i_qp = h->param.i_mobiclip ? h->mb.i_qp : h->mb.i_chroma_qp )
         {
             for( int i = (p == 0 && h->mb.i_skip_intra) ? 15 : 0; i < 16; i++ )
             {
@@ -1135,9 +1135,11 @@ static ALWAYS_INLINE void macroblock_encode_internal( x264_t *h, int plane_count
             ALIGNED_ARRAY_64( dctcoef, dct8x8,[4],[64] );
             b_decimate &= !h->mb.b_trellis || !h->param.b_cabac; // 8x8 trellis is inherently optimal decimation for CABAC
 
-            for( int p = 0; p < plane_count; p++, i_qp = h->mb.i_qp )
+            for( int p = 0; p < plane_count; p++, i_qp = h->param.i_mobiclip ? h->mb.i_qp : h->mb.i_chroma_qp )
             {
-				int quant_cat = CQM_8IY;//p ? CQM_8PC : CQM_8PY;
+                /* Mobiclip quantizes inter with the intra matrices at the luma
+                 * QP; standard H.264 has its own inter matrices. */
+                int quant_cat = h->param.i_mobiclip ? CQM_8IY : (p ? CQM_8PC : CQM_8PY);
                 CLEAR_16x16_NNZ( p );
                 h->dctf.sub16x16_dct8( dct8x8, h->mb.pic.p_fenc[p], h->mb.pic.p_fdec[p] );
                 h->nr_count[1+!!p*2] += h->mb.b_noise_reduction * 4;
@@ -1145,7 +1147,7 @@ static ALWAYS_INLINE void macroblock_encode_internal( x264_t *h, int plane_count
                 int plane_cbp = 0;
                 for( int idx = 0; idx < 4; idx++ )
                 {
-                    nz = x264_quant_8x8( h, dct8x8[idx], i_qp, ctx_cat_plane[DCT_LUMA_8x8][p], 1, p, idx );
+                    nz = x264_quant_8x8( h, dct8x8[idx], i_qp, ctx_cat_plane[DCT_LUMA_8x8][p], h->param.i_mobiclip, p, idx );
 
                     if( nz )
                     {
@@ -1177,9 +1179,9 @@ static ALWAYS_INLINE void macroblock_encode_internal( x264_t *h, int plane_count
         else
         {
             ALIGNED_ARRAY_64( dctcoef, dct4x4,[16],[16] );
-            for( int p = 0; p < plane_count; p++, i_qp = h->mb.i_qp )
+            for( int p = 0; p < plane_count; p++, i_qp = h->param.i_mobiclip ? h->mb.i_qp : h->mb.i_chroma_qp )
             {
-				int quant_cat = CQM_4IY;//p ? CQM_4PC : CQM_4PY;
+                int quant_cat = h->param.i_mobiclip ? CQM_4IY : (p ? CQM_4PC : CQM_4PY);
                 CLEAR_16x16_NNZ( p );
                 h->dctf.sub16x16_dct( dct4x4, h->mb.pic.p_fenc[p], h->mb.pic.p_fdec[p] );
 
@@ -1200,7 +1202,7 @@ static ALWAYS_INLINE void macroblock_encode_internal( x264_t *h, int plane_count
                         for( int i4x4 = 0; i4x4 < 4; i4x4++ )
                         {
                             int idx = i8x8*4+i4x4;
-                            if( x264_quant_4x4_trellis( h, dct4x4[idx], quant_cat, i_qp, ctx_cat_plane[DCT_LUMA_4x4][p], 1, !!p, p*16+idx ) )
+                            if( x264_quant_4x4_trellis( h, dct4x4[idx], quant_cat, i_qp, ctx_cat_plane[DCT_LUMA_4x4][p], h->param.i_mobiclip, !!p, p*16+idx ) )
                             {
                                 h->zigzagf.scan_4x4( h->dct.luma4x4[p*16+idx], dct4x4[idx] );
                                 h->quantf.dequant_4x4( dct4x4[idx], h->dequant4_mf[quant_cat], i_qp );
@@ -1282,7 +1284,12 @@ static ALWAYS_INLINE void macroblock_encode_internal( x264_t *h, int plane_count
         }
 
         /* encode the 8x8 blocks */
-        x264_mb_encode_chroma( h, !IS_INTRA( h->mb.i_type ), /*h->mb.i_chroma_qp*/h->mb.i_qp);
+        /* Mobiclip has no chroma_qp_index_offset -- chroma uses the luma
+         * quantizer.  Standard H.264 must keep i_chroma_qp, or the encoder
+         * quantizes chroma at a different QP than the one the decoder derives
+         * from the PPS, and the chroma planes come out wrong. */
+        x264_mb_encode_chroma( h, !IS_INTRA( h->mb.i_type ),
+                               h->param.i_mobiclip ? h->mb.i_qp : h->mb.i_chroma_qp );
     }
     else
         h->mb.i_cbp_chroma = 0;
@@ -1350,7 +1357,11 @@ void x264_macroblock_encode( x264_t *h )
  *****************************************************************************/
 static ALWAYS_INLINE int macroblock_probe_skip_internal( x264_t *h, int b_bidir, int plane_count, int chroma )
 {
-	return 0;
+    /* Mobiclip has its own static-macroblock handling in macroblock_encode
+     * (b_mobi_skip) and does not use H.264 P_SKIP, but disabling the probe for
+     * standard H.264 too costs every skippable macroblock in the stream. */
+    if( h->param.i_mobiclip )
+        return 0;
     ALIGNED_ARRAY_64( dctcoef, dct4x4,[8],[16] );
     ALIGNED_ARRAY_64( dctcoef, dctscan,[16] );
     ALIGNED_4( int16_t mvp[2] );
@@ -1358,7 +1369,7 @@ static ALWAYS_INLINE int macroblock_probe_skip_internal( x264_t *h, int b_bidir,
 
     for( int p = 0; p < plane_count; p++, i_qp = h->mb.i_chroma_qp )
     {
-		int quant_cat = CQM_4IY;// p ? CQM_4PC : CQM_4PY;
+        int quant_cat = h->param.i_mobiclip ? CQM_4IY : (p ? CQM_4PC : CQM_4PY);
         if( !b_bidir )
         {
             /* Get the MV */
@@ -1396,7 +1407,7 @@ static ALWAYS_INLINE int macroblock_probe_skip_internal( x264_t *h, int b_bidir,
 
     if( chroma == CHROMA_420 || chroma == CHROMA_422 )
     {
-        i_qp = h->mb.i_qp;
+        i_qp = h->param.i_mobiclip ? h->mb.i_qp : h->mb.i_chroma_qp;
         int chroma422 = chroma == CHROMA_422;
         int thresh = chroma422 ? (x264_lambda2_tab[i_qp] + 16) >> 5 : (x264_lambda2_tab[i_qp] + 32) >> 6;
         int ssd;
@@ -1604,13 +1615,13 @@ static ALWAYS_INLINE void macroblock_encode_p8x8_internal( x264_t *h, int i8, in
         {
             for( int p = 0; p < plane_count; p++, i_qp = h->mb.i_chroma_qp )
             {
-				int quant_cat = CQM_8IY;// p ? CQM_8PC : CQM_8PY;
+                int quant_cat = h->param.i_mobiclip ? CQM_8IY : (p ? CQM_8PC : CQM_8PY);
                 pixel *p_fenc = h->mb.pic.p_fenc[p] + 8*x + 8*y*FENC_STRIDE;
                 pixel *p_fdec = h->mb.pic.p_fdec[p] + 8*x + 8*y*FDEC_STRIDE;
                 ALIGNED_ARRAY_64( dctcoef, dct8x8,[64] );
 
                 h->dctf.sub8x8_dct8( dct8x8, p_fenc, p_fdec );
-                int nnz8x8 = x264_quant_8x8( h, dct8x8, i_qp, ctx_cat_plane[DCT_LUMA_8x8][p], 1, p, i8 );
+                int nnz8x8 = x264_quant_8x8( h, dct8x8, i_qp, ctx_cat_plane[DCT_LUMA_8x8][p], h->param.i_mobiclip, p, i8 );
                 if( nnz8x8 )
                 {
                     mobi_scan_8x8( h, h->dct.luma8x8[4*p+i8], dct8x8 );
@@ -1636,7 +1647,7 @@ static ALWAYS_INLINE void macroblock_encode_p8x8_internal( x264_t *h, int i8, in
         {
             for( int p = 0; p < plane_count; p++, i_qp = h->mb.i_chroma_qp )
             {
-				int quant_cat = CQM_4IY;//p ? CQM_4PC : CQM_4PY;
+                int quant_cat = h->param.i_mobiclip ? CQM_4IY : (p ? CQM_4PC : CQM_4PY);
                 pixel *p_fenc = h->mb.pic.p_fenc[p] + 8*x + 8*y*FENC_STRIDE;
                 pixel *p_fdec = h->mb.pic.p_fdec[p] + 8*x + 8*y*FDEC_STRIDE;
                 int i_decimate_8x8 = b_decimate ? 0 : 4;
@@ -1696,7 +1707,7 @@ static ALWAYS_INLINE void macroblock_encode_p8x8_internal( x264_t *h, int i8, in
 
         if( chroma == CHROMA_420 || chroma == CHROMA_422 )
         {
-            i_qp = h->mb.i_qp;
+            i_qp = h->param.i_mobiclip ? h->mb.i_qp : h->mb.i_chroma_qp;
             for( int ch = 0; ch < 2; ch++ )
             {
                 ALIGNED_ARRAY_64( dctcoef, dct4x4,[2],[16] );
@@ -1752,7 +1763,7 @@ static ALWAYS_INLINE void macroblock_encode_p4x4_internal( x264_t *h, int i4, in
 
     for( int p = 0; p < plane_count; p++, i_qp = h->mb.i_chroma_qp )
     {
-        int quant_cat = CQM_4IY;
+        int quant_cat = h->param.i_mobiclip ? CQM_4IY : (p ? CQM_4PC : CQM_4PY);
         pixel *p_fenc = &h->mb.pic.p_fenc[p][block_idx_xy_fenc[i4]];
         pixel *p_fdec = &h->mb.pic.p_fdec[p][block_idx_xy_fdec[i4]];
         int nz;
@@ -1768,7 +1779,7 @@ static ALWAYS_INLINE void macroblock_encode_p4x4_internal( x264_t *h, int i4, in
         {
             ALIGNED_ARRAY_64( dctcoef, dct4x4,[16] );
             h->dctf.sub4x4_dct( dct4x4, p_fenc, p_fdec );
-            nz = x264_quant_4x4( h, dct4x4, i_qp, ctx_cat_plane[DCT_LUMA_4x4][p], 1, p, i4 );
+            nz = x264_quant_4x4( h, dct4x4, i_qp, ctx_cat_plane[DCT_LUMA_4x4][p], h->param.i_mobiclip, p, i4 );
             h->mb.cache.non_zero_count[x264_scan8[p*16+i4]] = nz;
             if( nz )
             {

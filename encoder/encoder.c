@@ -252,7 +252,8 @@ static void slice_header_write( x264_t *h, bs_t *s, x264_slice_header_t *sh, int
     {
         int first_x = sh->i_first_mb % sh->sps->i_mb_width;
         int first_y = sh->i_first_mb / sh->sps->i_mb_width;
-        bs_write_ue( s, first_y * sh->sps->i_mb_width / 2 + first_x );
+        assert( (first_y&1) == 0 );
+        bs_write_ue( s, (2*first_x + sh->sps->i_mb_width*(first_y&~1) + (first_y&1)) >> 1 );
     }
     else
         bs_write_ue( s, sh->i_first_mb );
@@ -475,9 +476,12 @@ static int validate_parameters( x264_t *h, int b_open )
      * mapping desyncs the decoder's sidx = current_pic - index selection (a P
      * frame ends up referencing an unwritten picture buffer -> FAIL at the
      * !s->pic[sidx]->data[i] guard).  ref=1 always maps to the previous frame. */
-    h->param.i_threads         = 1;
-    h->param.i_bframe          = 0;
-    h->param.i_frame_reference = 1;
+    if( h->param.i_mobiclip )
+    {
+        h->param.i_threads         = 1;
+        h->param.i_bframe          = 0;
+        h->param.i_frame_reference = 1;
+    }
 
 #if HAVE_MMX
     if( b_open )
@@ -1300,9 +1304,10 @@ static int validate_parameters( x264_t *h, int b_open )
         h->param.rc.i_qp_max = X264_MIN(h->param.rc.i_qp_max, 63);
         h->param.rc.f_rf_constant = x264_clip3f(h->param.rc.f_rf_constant, 12, 63);
     }
-    /* CABAC init/encode is disabled (commented out) in this build; force
-     * CAVLC so the PPS entropy_coding_mode_flag matches the actual encoding. */
-    if( !h->param.i_mobiclip )
+    /* Mobiclip's bitstream has no CABAC, so its slice writer is CAVLC-only;
+     * force the flag off there so the PPS entropy_coding_mode_flag matches the
+     * actual encoding.  Standard H.264 keeps whatever the caller asked for. */
+    if( h->param.i_mobiclip )
         h->param.b_cabac = 0;
     if( !h->param.analyse.b_transform_8x8 )
     {
@@ -2949,18 +2954,18 @@ static intptr_t slice_write( x264_t *h )
 	h->sh.i_qp_delta = h->sh.i_qp - h->pps->i_pic_init_qp;
 
     slice_header_write( h, &h->out.bs, &h->sh, h->i_nal_ref_idc );
-    /*if( h->param.b_cabac )
+    if( h->param.b_cabac )
     {
-        /* alignment needed /
+        /* alignment needed */
         bs_align_1( &h->out.bs );
 
-        /* init cabac /
+        /* init cabac */
         x264_cabac_context_init( h, &h->cabac, h->sh.i_type, x264_clip3( h->sh.i_qp-QP_BD_OFFSET, 0, 51 ), h->sh.i_cabac_init_idc );
         x264_cabac_encode_init ( &h->cabac, h->out.bs.p, h->out.bs.p_end );
         last_emu_check = h->cabac.p;
     }
-    else*/
-    last_emu_check = h->out.bs.p;
+    else
+        last_emu_check = h->out.bs.p;
     h->mb.i_last_qp = h->sh.i_qp;
     h->mb.i_last_dqp = 0;
     h->mb.field_decoding_flag = 0;
@@ -3024,7 +3029,7 @@ static intptr_t slice_write( x264_t *h )
 reencode:
         x264_macroblock_encode( h );
 
-        /*if( h->param.b_cabac )
+        if( h->param.b_cabac )
         {
             if( mb_xy > h->sh.i_first_mb && !(SLICE_MBAFF && (i_mb_y&1)) )
                 x264_cabac_encode_terminal( &h->cabac );
@@ -3039,7 +3044,9 @@ reencode:
             }
         }
         else
-        {*/
+        {
+            /* Mobiclip codes every macroblock explicitly: it has no mb_skip_run
+             * and no P_SKIP, so the skip bookkeeping is skipped with it. */
             if( !h->param.i_mobiclip && IS_SKIP( h->mb.i_type ) )
                 i_skip++;
             else
@@ -3048,8 +3055,18 @@ reencode:
                     bs_write_ue( &h->out.bs, i_skip );  /* mb_skip_run */
                 i_skip = 0;
                 x264_macroblock_write_cavlc( h );
+                /* If there was a CAVLC level code overflow, try again at a higher QP. */
+                if( h->mb.b_overflow )
+                {
+                    h->mb.i_chroma_qp = h->chroma_qp_table[++h->mb.i_qp];
+                    h->mb.i_skip_intra = 0;
+                    h->mb.b_skip_mc = 0;
+                    h->mb.b_overflow = 0;
+                    bitstream_restore( h, &bs_bak[BS_BAK_CAVLC_OVERFLOW], &i_skip, 0 );
+                    goto reencode;
+                }
             }
-       // }
+        }
 
         int total_bits = bs_pos(&h->out.bs) + x264_cabac_pos(&h->cabac);
         int mb_size = total_bits - mb_spos;
@@ -3201,8 +3218,13 @@ cont:
         }
 
         /* calculate deblock strength values (actual deblocking is done per-row along with hpel) */
-        //if( b_deblock )
-        //    x264_macroblock_deblock_strength( h );
+        /* Mobiclip turns deblocking off entirely (b_deblocking_filter = 0), so
+         * b_deblock is already 0 there.  Standard H.264 needs the strengths:
+         * without them the encoder deblocks its own reference with stale bS
+         * while the decoder uses the real ones, so every P frame drifts a
+         * little further from the encoder's reconstruction. */
+        if( b_deblock )
+            x264_macroblock_deblock_strength( h );
 
         if( mb_xy == h->sh.i_last_mb )
             break;
@@ -3246,6 +3268,11 @@ cont:
         /* MobiClip slices use 16 trailing zero bits (non-standard). */
         bs_write(&h->out.bs, 16, 0);
         bs_flush( &h->out.bs );
+    }
+    else if( h->param.b_cabac )
+    {
+        x264_cabac_encode_flush( h, &h->cabac );
+        h->out.bs.p = h->cabac.p;
     }
     else
     {

@@ -3110,7 +3110,9 @@ void x264_macroblock_analyse( x264_t *h )
     /*--------------------------- Do the analysis ---------------------------*/
     if( h->sh.i_type == SLICE_TYPE_I )
     {
+        int b_pcm;
 intra_analysis:
+        b_pcm = 0;
         if( analysis.i_mbrd )
             mb_init_fenc_cache( h, analysis.i_mbrd >= 2 );
         mb_analyse_intra( h, &analysis, COST_MAX );
@@ -3151,10 +3153,13 @@ intra_analysis:
             COPY2_IF_LT( i_cost, analysis.i_satd_i4x4, h->mb.i_type, I_4x4 );
             COPY2_IF_LT( i_cost, analysis.i_satd_i8x8, h->mb.i_type, I_8x8 );
             if( analysis.i_satd_pcm < i_cost )
+            {
                 h->mb.i_type = I_PCM;
+                b_pcm = 1;
+            }
         }
 
-        if( analysis.i_mbrd >= 2 )
+        if( !b_pcm && analysis.i_mbrd >= 2 )
             intra_rd_refine( h, &analysis );
     }
     else if( h->sh.i_type == SLICE_TYPE_P )
