@@ -314,6 +314,7 @@ example$(EXE): $(OBJEXAMPLE) $(LIBX264)
 .PHONY: check-mobiclip
 check-mobiclip: mobiclip-regression$(EXE)
 	./mobiclip-regression$(EXE) parameters
+	./mobiclip-regression$(EXE) slices
 	./mobiclip-regression$(EXE)
 	./mobiclip-regression$(EXE) reconstruction mobiclip-regression.yuv
 	rm -f mobiclip-regression.yuv

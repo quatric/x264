@@ -487,6 +487,16 @@ static int validate_parameters( x264_t *h, int b_open )
         h->param.i_threads         = 1;
         h->param.i_bframe          = 0;
         h->param.i_frame_reference = 1;
+        /* Mobiclip has no slice address: each frame must be encoded in full. */
+        if( h->param.i_slice_count > 1 || h->param.i_slice_max_size > 0 ||
+            h->param.i_slice_max_mbs > 0 )
+            x264_log( h, X264_LOG_WARNING, "Mobiclip does not support multiple slices; disabling slice limits\n" );
+        h->param.b_sliced_threads  = 0;
+        h->param.i_slice_count     = 1;
+        h->param.i_slice_count_max = 1;
+        h->param.i_slice_max_size  = 0;
+        h->param.i_slice_max_mbs   = 0;
+        h->param.i_slice_min_mbs   = 0;
     }
 
 #if HAVE_MMX

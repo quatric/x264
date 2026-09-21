@@ -7,6 +7,8 @@ Configure with --enable-static and 8-bit support, then run:
 
 The C API tests check:
 
+- Slice count, byte limits and macroblock limits cannot split Mobiclip frames,
+  while standard H.264 still supports multiple slices.
 - Explicit keyint=1 produces only keyframes.
 - QP/CRF below 12 cannot activate H.264 lossless coding or invert QP bounds.
 - Unsupported chroma formats and 10-bit Mobiclip are rejected at encoder open.

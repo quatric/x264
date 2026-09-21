@@ -8,6 +8,7 @@
 static int failures;
 static char *dump_path;
 static int mobiclip = 1;
+static int slice_case;
 #define CHECK(condition, message) do { if( !(condition) ) { \
     fprintf( stderr, "FAIL: %s\n", message ); failures++; } } while( 0 )
 
@@ -106,6 +107,9 @@ static int encode_layout( int csp, int qp, int keyint, uint8_t *output, int capa
     p.rc.i_qp_constant = qp;
     p.i_keyint_max = keyint;
     p.psz_dump_yuv = dump_path;
+    if( slice_case == 1 ) p.i_slice_count = 2;
+    if( slice_case == 2 ) p.i_slice_max_mbs = 1;
+    if( slice_case == 3 ) p.i_slice_max_size = 100;
     x264_t *h = x264_encoder_open( &p );
     if( !h ) return -1;
     if( x264_picture_alloc( &in, csp, 64, 64 ) < 0 )
@@ -162,13 +166,17 @@ static int encode_layout( int csp, int qp, int keyint, uint8_t *output, int capa
             }
         }
         if( keyint == 1 ) CHECK( out.b_keyframe, "keyint=1 must encode every frame as a keyframe" );
+        int slices = 0;
         for( int n = 0; n < nnal; n++ )
             if( nals[n].i_type == NAL_SLICE || nals[n].i_type == NAL_SLICE_IDR )
             {
+                slices++;
                 if( nals[n].i_payload > capacity - used ) { used = -1; goto end; }
                 memcpy( output + used, nals[n].p_payload, nals[n].i_payload );
                 used += nals[n].i_payload;
             }
+        if( mobiclip ) CHECK( slices == 1, "Mobiclip frames must not be split into H.264 slices" );
+        else if( slice_case && (slice_case != 3 || f == 0) ) CHECK( slices > 1, "H.264 slice limits must still split frames" );
     }
 end:
     x264_picture_clean( &in );
@@ -181,6 +189,24 @@ int main( int argc, char **argv )
     static uint8_t planar[65536], other[65536];
     if( argc > 1 && !strcmp( argv[1], "parameters" ) )
         test_parameters();
+    else if( argc > 1 && !strcmp( argv[1], "slices" ) )
+    {
+        for( mobiclip = 1; mobiclip <= 2; mobiclip++ )
+        {
+            slice_case = 0;
+            int size = encode_layout( X264_CSP_I420, 24, 30, planar, sizeof(planar) );
+            for( slice_case = 1; slice_case <= 3; slice_case++ )
+            {
+                int len = encode_layout( X264_CSP_I420, 24, 30, other, sizeof(other) );
+                CHECK( len == size && len > 0 && !memcmp( planar, other, len ),
+                       "Mobiclip slice limits must preserve complete frame output" );
+            }
+        }
+        mobiclip = 0;
+        for( slice_case = 1; slice_case <= 3; slice_case++ )
+            CHECK( encode_layout( X264_CSP_I420, 24, 30, other, sizeof(other) ) > 0,
+                   "encode H.264 with slice limits" );
+    }
     else if( argc > 1 && !strcmp( argv[1], "standard" ) )
     {
         mobiclip = 0;
