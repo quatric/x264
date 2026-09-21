@@ -6,6 +6,8 @@
 #include "x264.h"
 
 static int failures;
+static char *dump_path;
+static int mobiclip = 1;
 #define CHECK(condition, message) do { if( !(condition) ) { \
     fprintf( stderr, "FAIL: %s\n", message ); failures++; } } while( 0 )
 
@@ -100,8 +102,10 @@ static int encode_layout( int csp, int qp, int keyint, uint8_t *output, int capa
     int nnal, used = 0;
     defaults( &p );
     p.i_csp = csp;
+    p.i_mobiclip = mobiclip;
     p.rc.i_qp_constant = qp;
     p.i_keyint_max = keyint;
+    p.psz_dump_yuv = dump_path;
     x264_t *h = x264_encoder_open( &p );
     if( !h ) return -1;
     if( x264_picture_alloc( &in, csp, 64, 64 ) < 0 )
@@ -135,6 +139,28 @@ static int encode_layout( int csp, int qp, int keyint, uint8_t *output, int capa
         int size = x264_encoder_encode( h, &nals, &nnal, &in, &out );
         CHECK( size > 0, "zerolatency encoding must produce a frame" );
         if( size <= 0 ) { used = -1; break; }
+        CHECK( out.img.i_csp == (mobiclip ? X264_CSP_I420 : X264_CSP_NV12) &&
+               out.img.i_plane == (mobiclip ? 3 : 2),
+               "reconstruction metadata must match the plane layout" );
+        if( dump_path )
+        {
+            FILE *dump = fopen( dump_path, "rb" );
+            CHECK( dump, "open reconstruction dump" );
+            if( dump )
+            {
+                uint8_t row[64];
+                int matches = !fseek( dump, (long)f * 64 * 64 * 3 / 2, SEEK_SET );
+                for( int pl = 0; pl < 3; pl++ )
+                    for( int y = 0; y < (64 >> !!pl); y++ )
+                    {
+                        int width = 64 >> !!pl;
+                        matches &= fread( row, 1, width, dump ) == width &&
+                            !memcmp( row, out.img.plane[pl] + y*out.img.i_stride[pl], width );
+                    }
+                CHECK( matches, "dump must match reconstructed Y, U and V planes" );
+                fclose( dump );
+            }
+        }
         if( keyint == 1 ) CHECK( out.b_keyframe, "keyint=1 must encode every frame as a keyframe" );
         for( int n = 0; n < nnal; n++ )
             if( nals[n].i_type == NAL_SLICE || nals[n].i_type == NAL_SLICE_IDR )
@@ -155,6 +181,18 @@ int main( int argc, char **argv )
     static uint8_t planar[65536], other[65536];
     if( argc > 1 && !strcmp( argv[1], "parameters" ) )
         test_parameters();
+    else if( argc > 1 && !strcmp( argv[1], "standard" ) )
+    {
+        mobiclip = 0;
+        CHECK( encode_layout( X264_CSP_I420, 24, 30, planar, sizeof(planar) ) > 0,
+               "Mobiclip debug options must not break standard H.264 encoding" );
+    }
+    else if( argc > 2 && !strcmp( argv[1], "reconstruction" ) )
+    {
+        dump_path = argv[2];
+        CHECK( encode_layout( X264_CSP_I420, 24, 30, planar, sizeof(planar) ) > 0,
+               "encode sequence with reconstruction dump" );
+    }
     else
     {
         int size = encode_layout( X264_CSP_I420, 24, 30, planar, sizeof(planar) );

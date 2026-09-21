@@ -315,6 +315,9 @@ example$(EXE): $(OBJEXAMPLE) $(LIBX264)
 check-mobiclip: mobiclip-regression$(EXE)
 	./mobiclip-regression$(EXE) parameters
 	./mobiclip-regression$(EXE)
+	./mobiclip-regression$(EXE) reconstruction mobiclip-regression.yuv
+	rm -f mobiclip-regression.yuv
+	MOBI_FDECDUMP=mobiclip-regression-debug.yuv ./mobiclip-regression$(EXE) standard
 
 mobiclip-regression$(EXE): tools/mobiclip-regression.o $(LIBX264)
 	$(LD)$@ $^ $(LDFLAGS)
@@ -429,7 +432,7 @@ clean:
 	rm -f $(SONAME) *.a *.lib *.exp *.pdb x264$(EXE) x264_lookahead.clbin
 	rm -f checkasm8$(EXE) checkasm10$(EXE) $(OBJCHK) $(OBJCHK_8) $(OBJCHK_10)
 	rm -f example$(EXE) $(OBJEXAMPLE)
-	rm -f mobiclip-regression$(EXE) tools/mobiclip-regression.o
+	rm -f mobiclip-regression$(EXE) tools/mobiclip-regression.o mobiclip-regression.yuv mobiclip-regression-debug.yuv
 	rm -f $(OBJPROF:%.o=%.gcda) $(OBJPROF:%.o=%.gcno) *.dyn pgopti.dpi pgopti.dpi.lock *.pgd *.pgc
 
 distclean: clean

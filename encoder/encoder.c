@@ -100,7 +100,13 @@ static void frame_dump( x264_t *h )
         for( int p = 0; p < (CHROMA444 ? 3 : 1); p++ )
             for( int y = 0; y < h->param.i_height; y++ )
                 fwrite( &h->fdec->plane[p][y*h->fdec->i_stride[p]], SIZEOF_PIXEL, h->param.i_width, f );
-        if( CHROMA_FORMAT == CHROMA_420 || CHROMA_FORMAT == CHROMA_422 )
+        if( h->param.i_mobiclip )
+        {
+            for( int p = 1; p < 3; p++ )
+                for( int y = 0; y < h->param.i_height >> 1; y++ )
+                    fwrite( &h->fdec->plane[p][y*h->fdec->i_stride[p]], SIZEOF_PIXEL, h->param.i_width >> 1, f );
+        }
+        else if( CHROMA_FORMAT == CHROMA_420 || CHROMA_FORMAT == CHROMA_422 )
         {
             int cw = h->param.i_width>>1;
             int ch = h->param.i_height>>CHROMA_V_SHIFT;
@@ -3257,7 +3263,7 @@ cont:
     if( h->sh.i_last_mb < h->sh.i_first_mb )
         return 0;
 
-    if( getenv("MOBI_FDECDUMP") )
+    if( h->param.i_mobiclip && getenv("MOBI_FDECDUMP") )
     {
         FILE *fd = fopen( getenv("MOBI_FDECDUMP"), "ab" );
         if( fd )
@@ -4162,7 +4168,7 @@ static int encoder_frame_end( x264_t *h, x264_t *thread_current,
 
     pic_out->opaque = h->fenc->opaque;
 
-    pic_out->img.i_csp = h->fdec->i_csp;
+    pic_out->img.i_csp = h->param.i_mobiclip ? X264_CSP_I420 : h->fdec->i_csp;
 #if HIGH_BIT_DEPTH
     pic_out->img.i_csp |= X264_CSP_HIGH_DEPTH;
 #endif
