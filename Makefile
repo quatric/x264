@@ -310,6 +310,17 @@ checkasm10$(EXE): $(OBJCHK) $(OBJCHK_10) $(LIBX264)
 example$(EXE): $(OBJEXAMPLE) $(LIBX264)
 	$(LD)$@ $(OBJEXAMPLE) $(LIBX264) $(LDFLAGS)
 
+# Public API regressions for the custom Mobiclip path.
+.PHONY: check-mobiclip
+check-mobiclip: mobiclip-regression$(EXE)
+	./mobiclip-regression$(EXE) parameters
+	./mobiclip-regression$(EXE)
+
+mobiclip-regression$(EXE): tools/mobiclip-regression.o $(LIBX264)
+	$(LD)$@ $^ $(LDFLAGS)
+
+tools/mobiclip-regression.o: x264.h x264_config.h
+
 $(OBJS) $(OBJSO): CFLAGS += $(CFLAGSSO)
 $(OBJCLI): CFLAGS += $(CFLAGSCLI)
 
@@ -418,6 +429,7 @@ clean:
 	rm -f $(SONAME) *.a *.lib *.exp *.pdb x264$(EXE) x264_lookahead.clbin
 	rm -f checkasm8$(EXE) checkasm10$(EXE) $(OBJCHK) $(OBJCHK_8) $(OBJCHK_10)
 	rm -f example$(EXE) $(OBJEXAMPLE)
+	rm -f mobiclip-regression$(EXE) tools/mobiclip-regression.o
 	rm -f $(OBJPROF:%.o=%.gcda) $(OBJPROF:%.o=%.gcno) *.dyn pgopti.dpi pgopti.dpi.lock *.pgd *.pgc
 
 distclean: clean

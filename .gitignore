@@ -50,3 +50,6 @@ common/oclobj.h
 x264_lookahead.clbin
 tools/checkasm-aarch64.S
 .sentry-native
+
+/mobiclip-regression
+/mobiclip-regression.exe

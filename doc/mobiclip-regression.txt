@@ -1,0 +1,18 @@
+Mobiclip regression tests
+========================
+
+Configure with --enable-static and 8-bit support, then run:
+
+    make check-mobiclip
+
+The C API tests check:
+
+- Explicit keyint=1 produces only keyframes.
+- QP/CRF below 12 cannot activate H.264 lossless coding or invert QP bounds.
+- Unsupported chroma formats and 10-bit Mobiclip are rejected at encoder open.
+- I420, YV12, NV12 and NV21 versions of the same samples produce identical
+  encoded slice bytes, including predicted frames.
+- QP 0 is clamped to the format floor and produces the same slices as QP 12.
+
+The tests use synthetic frames and need no external files or decoder.
+They exercise the public API and run independently of the assembly tests.

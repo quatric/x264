@@ -459,7 +459,16 @@ int x264_frame_copy_picture( x264_t *h, x264_frame_t *dst, x264_picture_t *src )
         get_plane_ptr( h, src, &pix[0], &stride[0], 0, 0, 0 );
         h->mc.plane_copy( dst->plane[0], dst->i_stride[0], (pixel*)pix[0],
                           stride[0]/SIZEOF_PIXEL, h->param.i_width, h->param.i_height );
-        if( i_csp == X264_CSP_NV12 || i_csp == X264_CSP_NV16 )
+        if( h->param.i_mobiclip && (i_csp == X264_CSP_NV12 || i_csp == X264_CSP_NV21) )
+        {
+            int uv_swap = i_csp == X264_CSP_NV21;
+            get_plane_ptr( h, src, &pix[1], &stride[1], 1, 0, v_shift );
+            h->mc.plane_copy_deinterleave( dst->plane[1+uv_swap], dst->i_stride[1+uv_swap],
+                                           dst->plane[2-uv_swap], dst->i_stride[2-uv_swap],
+                                           (pixel*)pix[1], stride[1]/SIZEOF_PIXEL,
+                                           h->param.i_width>>1, h->param.i_height>>v_shift );
+        }
+        else if( i_csp == X264_CSP_NV12 || i_csp == X264_CSP_NV16 )
         {
             get_plane_ptr( h, src, &pix[1], &stride[1], 1, 0, v_shift );
             h->mc.plane_copy( dst->plane[1], dst->i_stride[1], (pixel*)pix[1],

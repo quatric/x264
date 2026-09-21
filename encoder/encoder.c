@@ -529,6 +529,13 @@ static int validate_parameters( x264_t *h, int b_open )
     }
 
     int i_csp = h->param.i_csp & X264_CSP_MASK;
+    if( h->param.i_mobiclip &&
+        (BIT_DEPTH != 8 || (i_csp != X264_CSP_I420 && i_csp != X264_CSP_YV12 &&
+                           i_csp != X264_CSP_NV12 && i_csp != X264_CSP_NV21)) )
+    {
+        x264_log( h, X264_LOG_ERROR, "Mobiclip requires 8-bit 4:2:0 input\n" );
+        return -1;
+    }
 #if X264_CHROMA_FORMAT
     if( CHROMA_FORMAT != CHROMA_400 && i_csp == X264_CSP_I400 )
     {
@@ -974,6 +981,14 @@ static int validate_parameters( x264_t *h, int b_open )
     h->param.rc.f_rf_constant = x264_clip3f( h->param.rc.f_rf_constant, -QP_BD_OFFSET, 51 );
     h->param.rc.f_rf_constant_max = x264_clip3f( h->param.rc.f_rf_constant_max, -QP_BD_OFFSET, 51 );
     h->param.rc.i_qp_constant = x264_clip3( h->param.rc.i_qp_constant, -1, QP_MAX );
+    /* Apply the format's floor before QP 0 enables H.264 lossless coding
+     * and before CQP derives its min/max bounds. Keep -1 as unspecified. */
+    if( h->param.i_mobiclip )
+    {
+        if( h->param.rc.i_qp_constant >= 0 )
+            h->param.rc.i_qp_constant = x264_clip3( h->param.rc.i_qp_constant, 12, 63 );
+        h->param.rc.f_rf_constant = x264_clip3f( h->param.rc.f_rf_constant, 12, 63 );
+    }
     h->param.analyse.i_subpel_refine = x264_clip3( h->param.analyse.i_subpel_refine, 0, 11 );
     h->param.rc.f_ip_factor = x264_clip3f( h->param.rc.f_ip_factor, 0.01, 10.0 );
     h->param.rc.f_pb_factor = x264_clip3f( h->param.rc.f_pb_factor, 0.01, 10.0 );
@@ -1274,16 +1289,13 @@ static int validate_parameters( x264_t *h, int b_open )
          * (luma + planar chroma), MV median prediction, and P-frame residual
          * coding all round-trip exactly.  P-frames are enabled by default; set
          * MOBI_INTRA_ONLY=1 to force every frame to be an I-frame (useful for
-         * debugging or maximum random-access).  If the user did not request a
-         * keyframe interval, default to 30 so periodic I-frames bound any
-         * quality loss and provide seek points. */
+         * debugging or maximum random-access).  Otherwise preserve the
+         * caller's keyframe interval, including explicit all-intra coding. */
         if( getenv("MOBI_INTRA_ONLY") )
         {
             h->param.i_keyint_max = 1;
             h->param.i_keyint_min = 1;
         }
-        else if( h->param.i_keyint_max <= 1 )
-            h->param.i_keyint_max = 30;
         /* In CQP mode x264 applies f_ip_factor (~1.4), so -qp N would not
          * actually produce QP N.  Pin the factors to 1.0 there so the option
          * means what it says.  Under CRF/ABR the factors are how rate control
@@ -1300,8 +1312,8 @@ static int validate_parameters( x264_t *h, int b_open )
          * letting mobi_qp() clamp behind RC's back -- RC would then model a
          * quantizer the encoder never used.  (The old cap of 39 dated from the
          * header carrying qp%6+12+6*QYX, where 39 mapped to 63.) */
-        h->param.rc.i_qp_min = X264_MAX(h->param.rc.i_qp_min, 12);
-        h->param.rc.i_qp_max = X264_MIN(h->param.rc.i_qp_max, 63);
+        h->param.rc.i_qp_max = x264_clip3(h->param.rc.i_qp_max, 12, 63);
+        h->param.rc.i_qp_min = x264_clip3(h->param.rc.i_qp_min, 12, h->param.rc.i_qp_max);
         h->param.rc.f_rf_constant = x264_clip3f(h->param.rc.f_rf_constant, 12, 63);
     }
     /* Mobiclip's bitstream has no CABAC, so its slice writer is CAVLC-only;
