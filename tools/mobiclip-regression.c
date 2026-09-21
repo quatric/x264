@@ -184,11 +184,98 @@ end:
     return used;
 }
 
+/* Inspect actual SEI messages, including the API caller's payload. */
+static void test_standard_sei( int threads )
+{
+    x264_param_t p;
+    x264_picture_t in, out;
+    x264_nal_t *nals;
+    int count, seen[256] = { 0 }, found_payload = 0;
+    uint8_t payload[20] = "0123456789abcdefSEI!";
+    x264_sei_payload_t extra = { sizeof(payload), 5, payload };
+    defaults( &p );
+    p.i_mobiclip = 0;
+    p.i_threads = threads;
+    p.b_sliced_threads = 0;
+    p.i_bframe = 0;
+    p.i_keyint_max = 5;
+    p.b_intra_refresh = 1;
+    p.i_frame_packing = 3;
+    p.b_pic_struct = 1;
+    p.i_nal_hrd = X264_NAL_HRD_CBR;
+    p.rc.i_rc_method = X264_RC_ABR;
+    p.rc.i_bitrate = p.rc.i_vbv_max_bitrate = 1000;
+    p.rc.i_vbv_buffer_size = 1000;
+    x264_t *h = x264_encoder_open( &p );
+    CHECK( h, "open H.264 SEI encoder" );
+    if( !h ) return;
+    if( x264_picture_alloc( &in, X264_CSP_I420, 64, 64 ) < 0 )
+    {
+        CHECK( 0, "allocate SEI input" );
+        x264_encoder_close( h );
+        return;
+    }
+    memset( in.img.plane[0], 100, 64 * 64 );
+    memset( in.img.plane[1], 128, 32 * 32 );
+    memset( in.img.plane[2], 128, 32 * 32 );
+    for( int frame = 0; frame < 20 || x264_encoder_delayed_frames( h ); frame++ )
+    {
+        in.i_pts = frame;
+        in.extra_sei.num_payloads = frame == 0;
+        in.extra_sei.payloads = &extra;
+        int ret = x264_encoder_encode( h, &nals, &count, frame < 20 ? &in : NULL, &out );
+        CHECK( ret >= 0, "encode H.264 SEI frame" );
+        if( ret < 0 ) break;
+        for( int n = 0; n < count; n++ )
+        {
+            if( nals[n].i_type != 6 ) continue;
+            uint8_t rbsp[8192];
+            int used = 0, zeros = 0;
+            int prefix = nals[n].p_payload[2] == 1 ? 4 : 5;
+            for( int j = prefix; j < nals[n].i_payload && used < sizeof(rbsp); j++ )
+            {
+                int byte = nals[n].p_payload[j];
+                if( zeros == 2 && byte == 3 ) { zeros = 0; continue; }
+                rbsp[used++] = byte;
+                zeros = byte == 0 ? zeros + 1 : 0;
+            }
+            for( int j = 0; j + 1 < used; )
+            {
+                int type = 0, size = 0;
+                while( j < used && rbsp[j] == 255 ) { type += 255; j++; }
+                if( j >= used ) break;
+                type += rbsp[j++];
+                while( j < used && rbsp[j] == 255 ) { size += 255; j++; }
+                if( j >= used ) break;
+                size += rbsp[j++];
+                if( size > used - j ) break;
+                if( type < 256 ) seen[type]++;
+                if( type == 5 && size == sizeof(payload) && !memcmp( rbsp + j, payload, size ) )
+                    found_payload = 1;
+                j += size;
+            }
+        }
+    }
+    CHECK( found_payload, "caller-supplied SEI must reach the bitstream" );
+    CHECK( seen[5] >= 2, "repeated headers must include encoder identification SEI" );
+    CHECK( seen[0], "HRD must include buffering-period SEI" );
+    CHECK( seen[1] == 20, "HRD must include picture timing for every frame" );
+    CHECK( seen[6], "intra refresh must include recovery-point SEI" );
+    CHECK( seen[45], "frame-packing option must emit SEI" );
+    x264_picture_clean( &in );
+    x264_encoder_close( h );
+}
+
 int main( int argc, char **argv )
 {
     static uint8_t planar[65536], other[65536];
     if( argc > 1 && !strcmp( argv[1], "parameters" ) )
         test_parameters();
+    else if( argc > 1 && !strcmp( argv[1], "sei" ) )
+    {
+        test_standard_sei( 1 );
+        test_standard_sei( 2 );
+    }
     else if( argc > 1 && !strcmp( argv[1], "slices" ) )
     {
         for( mobiclip = 1; mobiclip <= 2; mobiclip++ )

@@ -3925,12 +3925,15 @@ int     x264_encoder_encode( x264_t *h,
     /* write extra sei */
     for( int i = 0; i < h->fenc->extra_sei.num_payloads; i++ )
     {
-        //nal_start( h, NAL_SEI, NAL_PRIORITY_DISPOSABLE );
-        //x264_sei_write( &h->out.bs, h->fenc->extra_sei.payloads[i].payload, h->fenc->extra_sei.payloads[i].payload_size,
-        //                h->fenc->extra_sei.payloads[i].payload_type );
-        //if( nal_end( h ) )
-        //    return -1;
-        //overhead += h->out.nal[h->out.i_nal-1].i_payload + SEI_OVERHEAD;
+        if( !h->param.i_mobiclip )
+        {
+            nal_start( h, NAL_SEI, NAL_PRIORITY_DISPOSABLE );
+            x264_sei_write( &h->out.bs, h->fenc->extra_sei.payloads[i].payload, h->fenc->extra_sei.payloads[i].payload_size,
+                            h->fenc->extra_sei.payloads[i].payload_type );
+            if( nal_end( h ) )
+                return -1;
+            overhead += h->out.nal[h->out.i_nal-1].i_payload + SEI_OVERHEAD;
+        }
         if( h->fenc->extra_sei.sei_free )
         {
             h->fenc->extra_sei.sei_free( h->fenc->extra_sei.payloads[i].payload );
@@ -3948,25 +3951,25 @@ int     x264_encoder_encode( x264_t *h,
     if( h->fenc->b_keyframe )
     {
         /* Avid's decoder strictly wants two SEIs for AVC-Intra so we can't insert the x264 SEI */
-        if( h->param.b_repeat_headers && h->fenc->i_frame == 0 && !h->param.i_avcintra_class )
+        if( !h->param.i_mobiclip && h->param.b_repeat_headers && h->fenc->i_frame == 0 && !h->param.i_avcintra_class )
         {
             /* identify ourself */
-           // nal_start( h, NAL_SEI, NAL_PRIORITY_DISPOSABLE );
-            //if( x264_sei_version_write( h, &h->out.bs ) )
-            //    return -1;
-           // if( nal_end( h ) )
-            //    return -1;
-           // overhead += h->out.nal[h->out.i_nal-1].i_payload + SEI_OVERHEAD;
+            nal_start( h, NAL_SEI, NAL_PRIORITY_DISPOSABLE );
+            if( x264_sei_version_write( h, &h->out.bs ) )
+                return -1;
+            if( nal_end( h ) )
+                return -1;
+            overhead += h->out.nal[h->out.i_nal-1].i_payload + SEI_OVERHEAD;
         }
 
-        if( h->fenc->i_type != X264_TYPE_IDR )
+        if( !h->param.i_mobiclip && h->fenc->i_type != X264_TYPE_IDR )
         {
-            //int time_to_recovery = h->param.b_open_gop ? 0 : X264_MIN( h->mb.i_mb_width - 1, h->param.i_keyint_max ) + h->param.i_bframe - 1;
-            //nal_start( h, NAL_SEI, NAL_PRIORITY_DISPOSABLE );
-           // x264_sei_recovery_point_write( h, &h->out.bs, time_to_recovery );
-           // if( nal_end( h ) )
-            //    return -1;
-            //overhead += h->out.nal[h->out.i_nal-1].i_payload + SEI_OVERHEAD;
+            int time_to_recovery = h->param.b_open_gop ? 0 : X264_MIN( h->mb.i_mb_width - 1, h->param.i_keyint_max ) + h->param.i_bframe - 1;
+            nal_start( h, NAL_SEI, NAL_PRIORITY_DISPOSABLE );
+            x264_sei_recovery_point_write( h, &h->out.bs, time_to_recovery );
+            if( nal_end( h ) )
+                return -1;
+            overhead += h->out.nal[h->out.i_nal-1].i_payload + SEI_OVERHEAD;
         }
 
         if( h->param.mastering_display.b_mastering_display )
@@ -3997,34 +4000,34 @@ int     x264_encoder_encode( x264_t *h,
         }
     }
 
-    if( h->param.i_frame_packing >= 0 && (h->fenc->b_keyframe || h->param.i_frame_packing == 5) )
+    if( !h->param.i_mobiclip && h->param.i_frame_packing >= 0 && (h->fenc->b_keyframe || h->param.i_frame_packing == 5) )
     {
-        //nal_start( h, NAL_SEI, NAL_PRIORITY_DISPOSABLE );
-        //x264_sei_frame_packing_write( h, &h->out.bs );
-        //if( nal_end( h ) )
-       //     return -1;
-        //overhead += h->out.nal[h->out.i_nal-1].i_payload + SEI_OVERHEAD;
+        nal_start( h, NAL_SEI, NAL_PRIORITY_DISPOSABLE );
+        x264_sei_frame_packing_write( h, &h->out.bs );
+        if( nal_end( h ) )
+            return -1;
+        overhead += h->out.nal[h->out.i_nal-1].i_payload + SEI_OVERHEAD;
     }
 
     /* generate sei pic timing */
-    if( h->sps->vui.b_pic_struct_present || h->sps->vui.b_nal_hrd_parameters_present )
+    if( !h->param.i_mobiclip && (h->sps->vui.b_pic_struct_present || h->sps->vui.b_nal_hrd_parameters_present) )
     {
-        //nal_start( h, NAL_SEI, NAL_PRIORITY_DISPOSABLE );
-       // x264_sei_pic_timing_write( h, &h->out.bs );
-       // if( nal_end( h ) )
-       //     return -1;
-       // overhead += h->out.nal[h->out.i_nal-1].i_payload + SEI_OVERHEAD;
+        nal_start( h, NAL_SEI, NAL_PRIORITY_DISPOSABLE );
+        x264_sei_pic_timing_write( h, &h->out.bs );
+        if( nal_end( h ) )
+            return -1;
+        overhead += h->out.nal[h->out.i_nal-1].i_payload + SEI_OVERHEAD;
     }
 
     /* As required by Blu-ray. */
-    if( !IS_X264_TYPE_B( h->fenc->i_type ) && h->b_sh_backup )
+    if( !h->param.i_mobiclip && !IS_X264_TYPE_B( h->fenc->i_type ) && h->b_sh_backup )
     {
         h->b_sh_backup = 0;
-       // nal_start( h, NAL_SEI, NAL_PRIORITY_DISPOSABLE );
-      //  x264_sei_dec_ref_pic_marking_write( h, &h->out.bs );
-       // if( nal_end( h ) )
-       //     return -1;
-       // overhead += h->out.nal[h->out.i_nal-1].i_payload + SEI_OVERHEAD;
+        nal_start( h, NAL_SEI, NAL_PRIORITY_DISPOSABLE );
+        x264_sei_dec_ref_pic_marking_write( h, &h->out.bs );
+        if( nal_end( h ) )
+            return -1;
+        overhead += h->out.nal[h->out.i_nal-1].i_payload + SEI_OVERHEAD;
     }
 
     if( h->fenc->b_keyframe && h->param.b_intra_refresh )
@@ -4142,14 +4145,14 @@ static int encoder_frame_end( x264_t *h, x264_t *thread_current,
     x264_emms();
 
     /* generate buffering period sei and insert it into place */
-    /*if( h->i_thread_frames > 1 && h->fenc->b_keyframe && h->sps->vui.b_nal_hrd_parameters_present )
+    if( !h->param.i_mobiclip && h->i_thread_frames > 1 && h->fenc->b_keyframe && h->sps->vui.b_nal_hrd_parameters_present )
     {
         x264_hrd_fullness( h );
         nal_start( h, NAL_SEI, NAL_PRIORITY_DISPOSABLE );
         x264_sei_buffering_period_write( h, &h->out.bs );
         if( nal_end( h ) )
            return -1;
-        /* buffering period sei must follow AUD, SPS and PPS and precede all other SEIs /
+        /* buffering period sei must follow AUD, SPS and PPS and precede all other SEIs */
         int idx = 0;
         while( h->out.nal[idx].i_type == NAL_AUD ||
                h->out.nal[idx].i_type == NAL_SPS ||
@@ -4158,7 +4161,7 @@ static int encoder_frame_end( x264_t *h, x264_t *thread_current,
         x264_nal_t nal_tmp = h->out.nal[h->out.i_nal-1];
         memmove( &h->out.nal[idx+1], &h->out.nal[idx], (h->out.i_nal-idx-1)*sizeof(x264_nal_t) );
         h->out.nal[idx] = nal_tmp;
-    }*/
+    }
 
     int frame_size = encoder_encapsulate_nals( h, 0 );
     if( frame_size < 0 )
