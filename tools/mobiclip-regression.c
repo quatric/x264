@@ -1,5 +1,6 @@
 /* Mobiclip parameter and input-layout regressions. */
 #include <stdint.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -9,6 +10,7 @@ static int failures;
 static char *dump_path;
 static int mobiclip = 1;
 static int slice_case;
+static int forced_qp;
 #define CHECK(condition, message) do { if( !(condition) ) { \
     fprintf( stderr, "FAIL: %s\n", message ); failures++; } } while( 0 )
 
@@ -173,6 +175,12 @@ static int encode_layout( int csp, int qp, int keyint, uint8_t *output, int capa
     p.rc.i_qp_constant = qp;
     p.i_keyint_max = keyint;
     p.psz_dump_yuv = dump_path;
+    if( forced_qp )
+    {
+        p.rc.i_rc_method = X264_RC_CRF;
+        p.rc.i_qp_min = 12;
+        p.rc.i_qp_max = 63;
+    }
     if( slice_case == 1 ) p.i_slice_count = 2;
     if( slice_case == 2 ) p.i_slice_max_mbs = 1;
     if( slice_case == 3 ) p.i_slice_max_size = 100;
@@ -206,6 +214,7 @@ static int encode_layout( int csp, int qp, int keyint, uint8_t *output, int capa
                 }
             }
         in.i_pts = f;
+        in.i_qpplus1 = forced_qp;
         int size = x264_encoder_encode( h, &nals, &nnal, &in, &out );
         CHECK( size > 0, "zerolatency encoding must produce a frame" );
         if( size <= 0 ) { used = -1; break; }
@@ -337,6 +346,21 @@ int main( int argc, char **argv )
     static uint8_t planar[65536], other[65536];
     if( argc > 1 && !strcmp( argv[1], "parameters" ) )
         test_parameters();
+    else if( argc > 1 && !strcmp( argv[1], "forced-qp" ) )
+    {
+        forced_qp = 1;
+        int size = encode_layout( X264_CSP_I420, 24, 30, planar, sizeof(planar) );
+        forced_qp = INT_MIN;
+        int len = encode_layout( X264_CSP_I420, 24, 30, other, sizeof(other) );
+        CHECK( len == size && len > 0 && !memcmp( planar, other, len ),
+               "minimum integer QP override must clamp to the floor" );
+        forced_qp = 64;
+        size = encode_layout( X264_CSP_I420, 24, 30, planar, sizeof(planar) );
+        forced_qp = INT_MAX;
+        len = encode_layout( X264_CSP_I420, 24, 30, other, sizeof(other) );
+        CHECK( len == size && len > 0 && !memcmp( planar, other, len ),
+               "maximum integer QP override must clamp to the ceiling" );
+    }
     else if( argc > 1 && !strcmp( argv[1], "sei" ) )
     {
         test_standard_sei( 1 );
