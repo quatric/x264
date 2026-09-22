@@ -994,8 +994,8 @@ static int validate_parameters( x264_t *h, int b_open )
         }
     }
 
-    h->param.rc.f_rf_constant = x264_clip3f( h->param.rc.f_rf_constant, -QP_BD_OFFSET, 51 );
-    h->param.rc.f_rf_constant_max = x264_clip3f( h->param.rc.f_rf_constant_max, -QP_BD_OFFSET, 51 );
+    h->param.rc.f_rf_constant = x264_clip3f( h->param.rc.f_rf_constant, -QP_BD_OFFSET, h->param.i_mobiclip ? 63 : 51 );
+    h->param.rc.f_rf_constant_max = x264_clip3f( h->param.rc.f_rf_constant_max, -QP_BD_OFFSET, h->param.i_mobiclip ? 63 : 51 );
     h->param.rc.i_qp_constant = x264_clip3( h->param.rc.i_qp_constant, -1, QP_MAX );
     /* Apply the format's floor before QP 0 enables H.264 lossless coding
      * and before CQP derives its min/max bounds. Keep -1 as unspecified. */

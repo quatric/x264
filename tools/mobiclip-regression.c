@@ -77,6 +77,25 @@ static void test_parameters( void )
                "bitrate mode must also maintain valid QP bounds" );
         x264_encoder_close( h );
     }
+    for( int mode = 0; mode <= 2; mode++ )
+    {
+        defaults( &p );
+        p.i_mobiclip = mode;
+        p.rc.i_rc_method = X264_RC_CRF;
+        p.rc.f_rf_constant = 60;
+        p.rc.f_rf_constant_max = 63;
+        h = x264_encoder_open( &p );
+        CHECK( h, "open encoder at high CRF" );
+        if( h )
+        {
+            x264_encoder_parameters( h, &actual );
+            CHECK( actual.rc.f_rf_constant == (mode ? 60 : 51),
+                   "CRF ceiling must match the selected bitstream format" );
+            CHECK( actual.rc.f_rf_constant_max == (mode ? 63 : 51),
+                   "CRF maximum must retain the Mobiclip quantizer range" );
+            x264_encoder_close( h );
+        }
+    }
     const int unsupported[] = { X264_CSP_I400, X264_CSP_I422, X264_CSP_I444 };
     for( unsigned i = 0; i < sizeof(unsupported)/sizeof(*unsupported); i++ )
     {

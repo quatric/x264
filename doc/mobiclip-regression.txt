@@ -12,6 +12,7 @@ The C API tests check:
 - Standard H.264 retains caller SEI, HRD timing, recovery-point and frame-packing
   messages with single-threaded and frame-threaded encoding.
 - Explicit keyint=1 produces only keyframes.
+- Mobiclip CRF and CRF maximum retain values through 63; H.264 keeps its ceiling of 51.
 - QP/CRF below 12 cannot activate H.264 lossless coding or invert QP bounds.
 - Unsupported chroma formats and 10-bit Mobiclip are rejected at encoder open.
 - I420, YV12, NV12 and NV21 versions of the same samples produce identical
