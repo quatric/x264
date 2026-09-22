@@ -87,14 +87,15 @@ static void test_parameters( void )
         CHECK( !h, "reject non-finite or non-positive API zone bitrate factors" );
         if( h ) x264_encoder_close( h );
     }
-    const char *bad_zones[] = { "0,10,b=nan", "0,10,b=inf", "0,10,b=1e999" };
+    const char *bad_zones[] = { "0,10,b=nan", "0,10,b=inf", "0,10,b=1e999", "0,10,q=4294967296",
+                                "4294967296,10,q=24", "0,4294967306,q=24" };
     for( unsigned i = 0; i < sizeof(bad_zones)/sizeof(*bad_zones); i++ )
     {
         defaults( &p );
         p.i_mobiclip = 0;
         p.rc.psz_zones = (char *)bad_zones[i];
         h = x264_encoder_open( &p );
-        CHECK( !h, "reject non-finite textual zone bitrate factors" );
+        CHECK( !h, "reject malformed or overflowing textual zones" );
         if( h ) x264_encoder_close( h );
     }
     const int bad_modes[] = { -1, 3, 2147483647 };

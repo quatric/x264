@@ -31,6 +31,7 @@
 
 #include "common/common.h"
 #include "ratecontrol.h"
+#include <errno.h>
 #include "me.h"
 #include "mobi_ratecontrol.h"
 
@@ -1241,24 +1242,46 @@ fail:
     return -1;
 }
 
+static int parse_zone_integer( char **text, int *value )
+{
+    char *end;
+    errno = 0;
+    long parsed = strtol( *text, &end, 10 );
+    if( errno == ERANGE || parsed < INT_MIN || parsed > INT_MAX ||
+        end == *text || (*end && *end != ',') )
+        return -1;
+    *value = parsed;
+    *text = end;
+    return 0;
+}
+
 static int parse_zone( x264_t *h, x264_zone_t *z, char *p )
 {
-    int len = 0;
     char *tok, UNUSED *saveptr=NULL;
     z->param = NULL;
     z->f_bitrate_factor = 1;
-    if( 3 <= sscanf(p, "%d,%d,q=%d%n", &z->i_start, &z->i_end, &z->i_qp, &len) )
-        z->b_force_qp = 1;
-    else if( 3 <= sscanf(p, "%d,%d,b=%f%n", &z->i_start, &z->i_end, &z->f_bitrate_factor, &len) )
-        z->b_force_qp = 0;
-    else if( 2 <= sscanf(p, "%d,%d%n", &z->i_start, &z->i_end, &len) )
-        z->b_force_qp = 0;
-    else
+    z->b_force_qp = 0;
+    if( parse_zone_integer( &p, &z->i_start ) || *p != ',' )
+        goto invalid;
+    p++;
+    if( parse_zone_integer( &p, &z->i_end ) )
+        goto invalid;
+    if( !strncmp( p, ",q=", 3 ) )
     {
-        x264_log( h, X264_LOG_ERROR, "invalid zone: \"%s\"\n", p );
-        return -1;
+        p += 3;
+        if( parse_zone_integer( &p, &z->i_qp ) )
+            goto invalid;
+        z->b_force_qp = 1;
     }
-    p += len;
+    else if( !strncmp( p, ",b=", 3 ) )
+    {
+        char *end;
+        p += 3;
+        z->f_bitrate_factor = strtof( p, &end );
+        if( end == p || (*end && *end != ',') )
+            goto invalid;
+        p = end;
+    }
     if( !*p )
         return 0;
     CHECKED_MALLOC( z->param, sizeof(x264_param_t) );
@@ -1281,6 +1304,8 @@ static int parse_zone( x264_t *h, x264_zone_t *z, char *p )
         p = NULL;
     }
     return 0;
+invalid:
+    x264_log( h, X264_LOG_ERROR, "invalid zone near: \"%s\"\n", p );
 fail:
     return -1;
 }
