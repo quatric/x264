@@ -872,6 +872,19 @@ static int atoi_internal( const char *str, int *b_error )
     return (int)v;
 }
 
+static uint32_t atou_internal( const char *str, int *b_error )
+{
+    char *end;
+    errno = 0;
+    unsigned long v = strtoul( str, &end, 0 );
+    if( errno == ERANGE || v > UINT32_MAX || end == str || *end != '\0' )
+    {
+        *b_error = 1;
+        return 0;
+    }
+    return (uint32_t)v;
+}
+
 static double atof_internal( const char *str, int *b_error )
 {
     char *end;
@@ -942,7 +955,7 @@ REALIGN_STACK int x264_param_parse( x264_param_t *p, const char *name, const cha
     if( 0 );
     OPT("asm")
     {
-        p->cpu = X264_ISDIGIT(value[0]) ? (uint32_t)atoi(value) :
+        p->cpu = X264_ISDIGIT(value[0]) ? atou_internal( value, &b_error ) :
                  !strcasecmp(value, "auto") || atobool(value) ? x264_cpu_detect() : 0;
         if( b_error )
         {

@@ -64,6 +64,11 @@ static void test_parameters( void )
     CHECK( !x264_param_parse( &p, "fps", "4294967295/4294967295" ) &&
            p.i_fps_num == UINT32_MAX && p.i_fps_den == UINT32_MAX,
            "frame-rate components retain their full unsigned range" );
+    defaults( &p );
+    CHECK( !x264_param_parse( &p, "asm", "0xffffffff" ) && p.cpu == UINT32_MAX,
+           "CPU masks must retain their full unsigned 32-bit range" );
+    CHECK( x264_param_parse( &p, "asm", "0x100000000" ) == X264_PARAM_BAD_VALUE,
+           "CPU masks beyond 32 bits must be rejected" );
     const int bad_modes[] = { -1, 3, 2147483647 };
     for( unsigned i = 0; i < sizeof(bad_modes)/sizeof(*bad_modes); i++ )
     {
