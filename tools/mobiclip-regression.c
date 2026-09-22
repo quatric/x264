@@ -98,6 +98,17 @@ static void test_parameters( void )
         CHECK( !h, "reject malformed or overflowing textual zones" );
         if( h ) x264_encoder_close( h );
     }
+    const int bad_zone_counts[] = { -1, 1, INT_MAX };
+    for( unsigned i = 0; i < sizeof(bad_zone_counts)/sizeof(*bad_zone_counts); i++ )
+    {
+        defaults( &p );
+        x264_zone_t zone = { 0 };
+        p.rc.i_zones = bad_zone_counts[i];
+        p.rc.zones = p.rc.i_zones == INT_MAX ? &zone : NULL;
+        h = x264_encoder_open( &p );
+        CHECK( !h, "invalid zone counts or missing arrays must fail encoder open" );
+        if( h ) x264_encoder_close( h );
+    }
     const int bad_modes[] = { -1, 3, 2147483647 };
     for( unsigned i = 0; i < sizeof(bad_modes)/sizeof(*bad_modes); i++ )
     {
