@@ -49,6 +49,21 @@ static void test_parameters( void )
     defaults( &p );
     CHECK( !x264_param_parse( &p, "ratetol", "inf" ),
            "documented infinite rate tolerance must remain supported" );
+    const char *bad_rates[] = { "25/1junk", "30000/1001/2", "25/0", "-25/1",
+                                  "4294967296/1", "999999999999999999999999/1" };
+    for( unsigned i = 0; i < sizeof(bad_rates)/sizeof(*bad_rates); i++ )
+    {
+        defaults( &p );
+        CHECK( x264_param_parse( &p, "fps", bad_rates[i] ) == X264_PARAM_BAD_VALUE,
+               "malformed frame-rate fractions must be rejected" );
+    }
+    defaults( &p );
+    CHECK( !x264_param_parse( &p, "fps", "30000/1001" ) &&
+           p.i_fps_num == 30000 && p.i_fps_den == 1001,
+           "preserve exact fractional frame rates" );
+    CHECK( !x264_param_parse( &p, "fps", "4294967295/4294967295" ) &&
+           p.i_fps_num == UINT32_MAX && p.i_fps_den == UINT32_MAX,
+           "frame-rate components retain their full unsigned range" );
     const int bad_modes[] = { -1, 3, 2147483647 };
     for( unsigned i = 0; i < sizeof(bad_modes)/sizeof(*bad_modes); i++ )
     {

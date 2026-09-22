@@ -1078,13 +1078,27 @@ REALIGN_STACK int x264_param_parse( x264_param_t *p, const char *name, const cha
         b_error |= parse_enum( value, x264_transfer_names, &p->i_alternative_transfer );
     OPT("fps")
     {
-        int64_t i_fps_num;
-        int64_t i_fps_den;
-        if( sscanf( value, "%"SCNd64"/%"SCNd64, &i_fps_num, &i_fps_den ) == 2 )
+        if( strchr( value, '/' ) )
         {
-            p->i_fps_num = i_fps_num;
-            p->i_fps_den = i_fps_den;
-            b_error |= i_fps_num < 1 || i_fps_num > UINT32_MAX || i_fps_den < 1 || i_fps_den > UINT32_MAX;
+            char *end;
+            const char *den;
+            errno = 0;
+            int64_t num = strtoll( value, &end, 10 );
+            if( errno == ERANGE || end == value || *end != '/' || num < 1 || num > UINT32_MAX )
+                b_error = 1;
+            else
+            {
+                den = end + 1;
+                errno = 0;
+                int64_t divisor = strtoll( den, &end, 10 );
+                if( errno == ERANGE || end == den || *end || divisor < 1 || divisor > UINT32_MAX )
+                    b_error = 1;
+                else
+                {
+                    p->i_fps_num = num;
+                    p->i_fps_den = divisor;
+                }
+            }
         }
         else
         {
