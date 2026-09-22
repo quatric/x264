@@ -470,6 +470,12 @@ static int validate_parameters( x264_t *h, int b_open )
         return -1;
     }
 
+    if( h->param.i_mobiclip < 0 || h->param.i_mobiclip > 2 )
+    {
+        x264_log( h, X264_LOG_ERROR, "invalid Mobiclip mode: %d\n", h->param.i_mobiclip );
+        return -1;
+    }
+
     /* This x264 build emits a Mobiclip bitstream whose inter-frame state is
      * strictly sequential: the P-frame quantizer is delta-coded against the
      * previous frame (h->i_mobi_old_qp), motion vectors predict from the prior

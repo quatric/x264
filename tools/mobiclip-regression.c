@@ -31,6 +31,23 @@ static void test_parameters( void )
 {
     x264_param_t p, actual;
     x264_t *h;
+    const char *bad_integers[] = { "2147483648", "-2147483649", "4294967297",
+                                    "99999999999999999999999999999" };
+    for( unsigned i = 0; i < sizeof(bad_integers)/sizeof(*bad_integers); i++ )
+    {
+        defaults( &p );
+        CHECK( x264_param_parse( &p, "threads", bad_integers[i] ) == X264_PARAM_BAD_VALUE,
+               "integer option overflow must be rejected" );
+    }
+    const int bad_modes[] = { -1, 3, 2147483647 };
+    for( unsigned i = 0; i < sizeof(bad_modes)/sizeof(*bad_modes); i++ )
+    {
+        defaults( &p );
+        p.i_mobiclip = bad_modes[i];
+        h = x264_encoder_open( &p );
+        CHECK( !h, "reject undefined Mobiclip modes" );
+        if( h ) x264_encoder_close( h );
+    }
     defaults( &p );
     p.i_keyint_max = 1;
     h = x264_encoder_open( &p );

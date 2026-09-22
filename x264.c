@@ -1620,7 +1620,7 @@ static int parse( int argc, char **argv, x264_param_t *param, cli_opt_t *opt )
                 output_opt.use_dts_compress = 1;
                 break;
             case OPT_MOBICLIP:
-                param->i_mobiclip = atoi( optarg );
+                FAIL_IF_ERROR( x264_param_parse( param, "mobiclip", optarg ), "invalid Mobiclip mode `%s'\n", optarg );
                 break;
             case OPT_MOFLEX:
                 param->b_moflex = 1;

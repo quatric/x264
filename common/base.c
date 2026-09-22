@@ -27,6 +27,8 @@
 #include "base.h"
 
 #include <ctype.h>
+#include <errno.h>
+#include <limits.h>
 
 #if HAVE_MALLOC_H
 #include <malloc.h>
@@ -859,10 +861,14 @@ static int atobool_internal( const char *str, int *b_error )
 static int atoi_internal( const char *str, int *b_error )
 {
     char *end;
-    int v = strtol( str, &end, 0 );
-    if( end == str || *end != '\0' )
+    errno = 0;
+    long v = strtol( str, &end, 0 );
+    if( errno == ERANGE || v < INT_MIN || v > INT_MAX || end == str || *end != '\0' )
+    {
         *b_error = 1;
-    return v;
+        return 0;
+    }
+    return (int)v;
 }
 
 static double atof_internal( const char *str, int *b_error )
@@ -1000,7 +1006,10 @@ REALIGN_STACK int x264_param_parse( x264_param_t *p, const char *name, const cha
     OPT("avcintra-flavor")
         b_error |= parse_enum( value, x264_avcintra_flavor_names, &p->i_avcintra_flavor );
     OPT("mobiclip")
+    {
         p->i_mobiclip = atoi(value);
+        b_error |= p->i_mobiclip < 0 || p->i_mobiclip > 2;
+    }
     OPT("mobi_qyx")
         p->i_mobi_qyx = atoi(value);
     OPT("moflex")
