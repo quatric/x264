@@ -1,6 +1,7 @@
 /* Mobiclip parameter and input-layout regressions. */
 #include <stdint.h>
 #include <limits.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -71,6 +72,30 @@ static void test_parameters( void )
            "CPU masks must retain their full unsigned 32-bit range" );
     CHECK( x264_param_parse( &p, "asm", "0x100000000" ) == X264_PARAM_BAD_VALUE,
            "CPU masks beyond 32 bits must be rejected" );
+    const float bad_zone_factors[] = { NAN, INFINITY, -INFINITY, 0, -1 };
+    for( unsigned i = 0; i < sizeof(bad_zone_factors)/sizeof(*bad_zone_factors); i++ )
+    {
+        x264_zone_t zone = { 0 };
+        defaults( &p );
+        p.i_mobiclip = 0;
+        zone.i_end = 10;
+        zone.f_bitrate_factor = bad_zone_factors[i];
+        p.rc.i_zones = 1;
+        p.rc.zones = &zone;
+        h = x264_encoder_open( &p );
+        CHECK( !h, "reject non-finite or non-positive API zone bitrate factors" );
+        if( h ) x264_encoder_close( h );
+    }
+    const char *bad_zones[] = { "0,10,b=nan", "0,10,b=inf", "0,10,b=1e999" };
+    for( unsigned i = 0; i < sizeof(bad_zones)/sizeof(*bad_zones); i++ )
+    {
+        defaults( &p );
+        p.i_mobiclip = 0;
+        p.rc.psz_zones = (char *)bad_zones[i];
+        h = x264_encoder_open( &p );
+        CHECK( !h, "reject non-finite textual zone bitrate factors" );
+        if( h ) x264_encoder_close( h );
+    }
     const int bad_modes[] = { -1, 3, 2147483647 };
     for( unsigned i = 0; i < sizeof(bad_modes)/sizeof(*bad_modes); i++ )
     {

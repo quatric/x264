@@ -1323,7 +1323,7 @@ static int parse_zones( x264_t *h )
                           z.i_start, z.i_end );
                 return -1;
             }
-            else if( !z.b_force_qp && z.f_bitrate_factor <= 0 )
+            else if( !z.b_force_qp && (!isfinite( z.f_bitrate_factor ) || z.f_bitrate_factor <= 0) )
             {
                 x264_log( h, X264_LOG_ERROR, "invalid zone: bitrate_factor=%f\n",
                           z.f_bitrate_factor );
