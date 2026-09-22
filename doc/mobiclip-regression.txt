@@ -16,6 +16,7 @@ The C API tests check:
 - CPU masks retain the full unsigned 32-bit range while rejecting overflow.
 - Text and API zones reject non-finite and non-positive bitrate factors.
 - Integer option overflow and undefined Mobiclip mode values are rejected.
+- Extreme zone QPs clamp without signed overflow in H.264 and both Mobiclip modes.
 - Extreme per-picture QP overrides clamp without signed integer overflow.
 - Explicit keyint=1 produces only keyframes.
 - Mobiclip CRF and CRF maximum retain values through 63; H.264 keeps its ceiling of 51.

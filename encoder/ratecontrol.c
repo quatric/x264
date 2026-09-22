@@ -1547,7 +1547,7 @@ void x264_ratecontrol_start( x264_t *h, int i_force_qp, int overhead )
         if( zone )
         {
             if( zone->b_force_qp )
-                q += zone->i_qp - rc->qp_constant[SLICE_TYPE_P];
+                q += (double)zone->i_qp - rc->qp_constant[SLICE_TYPE_P];
             else
                 q -= 6*log2f( zone->f_bitrate_factor );
         }

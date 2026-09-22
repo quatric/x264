@@ -314,6 +314,7 @@ example$(EXE): $(OBJEXAMPLE) $(LIBX264)
 .PHONY: check-mobiclip
 check-mobiclip: mobiclip-regression$(EXE)
 	./mobiclip-regression$(EXE) parameters
+	./mobiclip-regression$(EXE) zone-qp
 	./mobiclip-regression$(EXE) forced-qp
 	./mobiclip-regression$(EXE) sei
 	./mobiclip-regression$(EXE) slices

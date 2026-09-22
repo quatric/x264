@@ -12,6 +12,7 @@ static char *dump_path;
 static int mobiclip = 1;
 static int slice_case;
 static int forced_qp;
+static int use_zone, zone_qp;
 #define CHECK(condition, message) do { if( !(condition) ) { \
     fprintf( stderr, "FAIL: %s\n", message ); failures++; } } while( 0 )
 
@@ -200,6 +201,15 @@ static int encode_layout( int csp, int qp, int keyint, uint8_t *output, int capa
     p.rc.i_qp_constant = qp;
     p.i_keyint_max = keyint;
     p.psz_dump_yuv = dump_path;
+    x264_zone_t zone = { 0 };
+    if( use_zone )
+    {
+        zone.i_end = 2;
+        zone.b_force_qp = 1;
+        zone.i_qp = zone_qp;
+        p.rc.zones = &zone;
+        p.rc.i_zones = 1;
+    }
     if( forced_qp )
     {
         p.rc.i_rc_method = X264_RC_CRF;
@@ -371,6 +381,25 @@ int main( int argc, char **argv )
     static uint8_t planar[65536], other[65536];
     if( argc > 1 && !strcmp( argv[1], "parameters" ) )
         test_parameters();
+    else if( argc > 1 && !strcmp( argv[1], "zone-qp" ) )
+    {
+        use_zone = 1;
+        for( mobiclip = 0; mobiclip <= 2; mobiclip++ )
+        {
+            zone_qp = 0;
+            int size = encode_layout( X264_CSP_I420, 24, 30, planar, sizeof(planar) );
+            zone_qp = INT_MIN;
+            int len = encode_layout( X264_CSP_I420, 24, 30, other, sizeof(other) );
+            CHECK( len == size && len > 0 && !memcmp( planar, other, len ),
+                   "minimum zone QP must clamp without wrapping to a high QP" );
+            zone_qp = 63;
+            size = encode_layout( X264_CSP_I420, 24, 30, planar, sizeof(planar) );
+            zone_qp = INT_MAX;
+            len = encode_layout( X264_CSP_I420, 24, 30, other, sizeof(other) );
+            CHECK( len == size && len > 0 && !memcmp( planar, other, len ),
+                   "maximum zone QP must clamp to the ceiling" );
+        }
+    }
     else if( argc > 1 && !strcmp( argv[1], "forced-qp" ) )
     {
         forced_qp = 1;
