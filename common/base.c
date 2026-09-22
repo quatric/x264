@@ -28,6 +28,7 @@
 
 #include <ctype.h>
 #include <errno.h>
+#include <float.h>
 #include <limits.h>
 
 #if HAVE_MALLOC_H
@@ -875,8 +876,13 @@ static double atof_internal( const char *str, int *b_error )
 {
     char *end;
     double v = strtod( str, &end );
-    if( end == str || *end != '\0' )
+    /* Numeric parameters are stored as floats. Reject values that would
+     * become non-finite on assignment, as well as explicit NaN/infinity. */
+    if( !(v >= -FLT_MAX && v <= FLT_MAX) || end == str || *end != '\0' )
+    {
         *b_error = 1;
+        return 0;
+    }
     return v;
 }
 

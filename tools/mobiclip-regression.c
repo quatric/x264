@@ -39,6 +39,16 @@ static void test_parameters( void )
         CHECK( x264_param_parse( &p, "threads", bad_integers[i] ) == X264_PARAM_BAD_VALUE,
                "integer option overflow must be rejected" );
     }
+    const char *bad_floats[] = { "nan", "-nan", "inf", "-inf", "1e999", "1e100" };
+    for( unsigned i = 0; i < sizeof(bad_floats)/sizeof(*bad_floats); i++ )
+    {
+        defaults( &p );
+        CHECK( x264_param_parse( &p, "crf", bad_floats[i] ) == X264_PARAM_BAD_VALUE,
+               "non-finite and overflowing floating-point options must be rejected" );
+    }
+    defaults( &p );
+    CHECK( !x264_param_parse( &p, "ratetol", "inf" ),
+           "documented infinite rate tolerance must remain supported" );
     const int bad_modes[] = { -1, 3, 2147483647 };
     for( unsigned i = 0; i < sizeof(bad_modes)/sizeof(*bad_modes); i++ )
     {
