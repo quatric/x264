@@ -1269,7 +1269,7 @@ static int parse_zone( x264_t *h, x264_zone_t *z, char *p )
     if( !strncmp( p, ",q=", 3 ) )
     {
         p += 3;
-        if( parse_zone_integer( &p, &z->i_qp ) )
+        if( parse_zone_integer( &p, &z->i_qp ) || z->i_qp < 0 || z->i_qp > QP_MAX )
             goto invalid;
         z->b_force_qp = 1;
     }
@@ -1299,6 +1299,8 @@ static int parse_zone( x264_t *h, x264_zone_t *z, char *p )
         if( x264_param_parse( z->param, tok, val ) )
         {
             x264_log( h, X264_LOG_ERROR, "invalid zone param: %s = %s\n", tok, val );
+            x264_free( z->param );
+            z->param = NULL;
             return -1;
         }
         p = NULL;

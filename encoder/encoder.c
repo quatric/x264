@@ -476,7 +476,8 @@ static int validate_parameters( x264_t *h, int b_open )
         return -1;
     }
 
-    if( h->param.rc.i_zones < 0 || h->param.rc.i_zones == INT_MAX ||
+    if( h->param.rc.i_zones < 0 ||
+        h->param.rc.i_zones > (int)(INT_MAX / sizeof(x264_zone_t)) - 1 ||
         (h->param.rc.i_zones > 0 && !h->param.rc.zones) )
     {
         x264_log( h, X264_LOG_ERROR, "invalid zone count or missing zone array\n" );
