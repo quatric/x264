@@ -608,6 +608,113 @@ static ALWAYS_INLINE void cavlc_mb_header_b( x264_t *h, int i_mb_type, int chrom
         cavlc_mb_header_i( h, i_mb_type, 23, chroma );
 }
 
+/* Write one coefficient of a block: its level, the number of zeros skipped
+ * since the previous coded one, and whether it is the block's last. */
+static ALWAYS_INLINE void encode_dct_coef(bs_t *s, const uint16_t *r11A, const uint8_t *r11B,
+                                          const int (*reftable)[64][2], int level, int skip, int last)
+{
+	int val = level;
+	if (val < 0)
+		val = -val;
+	if (x264_mobi_env.b_simpledct) goto explicit;
+	if (val <= 31)
+	{
+		int idx = reftable[val][skip][last];
+		if (idx >= 0)
+		{
+			int nrbits = r11A[idx] & 0xF;
+			uint32_t tidx = (uint32_t)idx;
+			if (nrbits < 12)
+				tidx >>= (12 - nrbits);
+			else if (nrbits > 12)
+				tidx <<= (nrbits - 12);
+			if (level < 0) 
+				tidx |= 1;
+			bs_write(s, nrbits, tidx);
+			return;
+		}
+		int newskip = skip - r11B[(val | ((last) << 6)) + 0x80];
+		if (newskip >= 0)
+		{
+			idx = reftable[val][newskip][last];
+			if (idx >= 0)
+			{
+				{
+				int esc_idx = reftable[0][0][0];
+				int esc_nrbits = r11A[esc_idx] & 0xF;
+				uint32_t esc_tidx = (uint32_t)esc_idx;
+				if (esc_nrbits < 12)
+					esc_tidx >>= (12 - esc_nrbits);
+				else if (esc_nrbits > 12)
+					esc_tidx <<= (esc_nrbits - 12);
+				bs_write(s, esc_nrbits, esc_tidx);
+			}
+				bs_write1(s, 1);
+				bs_write1(s, 0);
+				int nrbits = r11A[idx] & 0xF;
+				uint32_t tidx = (uint32_t)idx;
+				if (nrbits < 12)
+					tidx >>= (12 - nrbits);
+				else if (nrbits > 12)
+					tidx <<= (nrbits - 12);
+				if (level < 0)
+					tidx |= 1;
+				bs_write(s, nrbits, tidx);
+				return;
+			}
+		}
+	}
+	int newval = val - r11B[skip | ((last) << 6)];
+	if (newval >= 0 && newval <= 31)
+	{
+		int idx = reftable[newval][skip][last];
+		if (idx >= 0)
+		{
+			{
+				int esc_idx = reftable[0][0][0];
+				int esc_nrbits = r11A[esc_idx] & 0xF;
+				uint32_t esc_tidx = (uint32_t)esc_idx;
+				if (esc_nrbits < 12)
+					esc_tidx >>= (12 - esc_nrbits);
+				else if (esc_nrbits > 12)
+					esc_tidx <<= (esc_nrbits - 12);
+				bs_write(s, esc_nrbits, esc_tidx);
+			}
+			bs_write1(s, 0);
+			int nrbits = r11A[idx] & 0xF;
+			uint32_t tidx = (uint32_t)idx;
+			if (nrbits < 12)
+				tidx >>= (12 - nrbits);
+			else if (nrbits > 12)
+				tidx <<= (nrbits - 12);
+			if (level < 0) 
+				tidx |= 1;
+			bs_write(s, nrbits, tidx);
+			return;
+		}
+	}
+	//This is easiest way of writing the DCT, but also costs the most bits
+explicit:
+	{
+		int esc_idx = reftable[0][0][0];
+		int esc_nrbits = r11A[esc_idx] & 0xF;
+		uint32_t esc_tidx = (uint32_t)esc_idx;
+		if (esc_nrbits < 12)
+			esc_tidx >>= (12 - esc_nrbits);
+		else if (esc_nrbits > 12)
+			esc_tidx <<= (esc_nrbits - 12);
+		bs_write(s, esc_nrbits, esc_tidx);
+	}
+	bs_write1(s, 1);
+	bs_write1(s, 1);
+	if (last)
+		bs_write1(s, 1);
+	else
+		bs_write1(s, 0);
+	bs_write(s, 6, skip);
+	bs_write(s, 12, level & 0xFFF);
+}
+
 static int encode_dct(x264_t* h, dctcoef *l, int length, int table)
 {
 	bs_t *s = &h->out.bs;
@@ -616,6 +723,21 @@ static int encode_dct(x264_t* h, dctcoef *l, int length, int table)
 	const int (*reftable)[64][2] = table == 1 ? vx2_table1_a_rev : vx2_table0_a_rev;
 	int lastnonzero = 0;
 	int nnz = 0;
+#if MOBI_NEON && !HIGH_BIT_DEPTH
+	/* Where the non-zero coefficients are: one nibble each, 16 to a word. */
+	uint64_t nz[4];
+	const int words = length >> 4;
+	for (int w = 0; w < words; w++)
+	{
+		const int16x8_t a = vld1q_s16(l + 16 * w), b = vld1q_s16(l + 16 * w + 8);
+		nz[w] = mobi_nibble_mask_neon(vcombine_u8(vmovn_u16(vtstq_s16(a, a)), vmovn_u16(vtstq_s16(b, b))));
+		if (nz[w])
+		{
+			nnz += __builtin_popcountll(nz[w]) >> 2;
+			lastnonzero = 16 * w + ((63 - __builtin_clzll(nz[w])) >> 2);
+		}
+	}
+#else
 	for (int i = 0; i < length; i++)
 	{
 		if (l[i] != 0)
@@ -624,6 +746,7 @@ static int encode_dct(x264_t* h, dctcoef *l, int length, int table)
 			nnz++;
 		}
 	}
+#endif
 #if !RDO_SKIP_BS
 	static int _dctblk = 0;
 	int _dctstart = bs_pos(s);
@@ -635,122 +758,37 @@ static int encode_dct(x264_t* h, dctcoef *l, int length, int table)
 	}
 	_dctblk++;
 #endif
-	int skip = 0;
-	for (int i = 0; i < length; i++)
+	/* A block with nothing in it, or only its first coefficient, is written
+	 * as that one coefficient; otherwise every non-zero coefficient is,
+	 * each with the count of zeros before it. */
+	if (!lastnonzero)
+		encode_dct_coef(s, r11A, r11B, reftable, l[0], 0, 1);
+	else
 	{
-		if (l[i] == 0 && lastnonzero != 0)
-		{
-			skip++;
-			continue;
-		}
-		int val = l[i];
-		if (val < 0)
-			val = -val;
-		if (x264_mobi_env.b_simpledct) goto explicit;
-		if (val <= 31)
-		{
-			int idx = reftable[val][skip][(i == lastnonzero) ? 1 : 0];
-			if (idx >= 0)
+#if MOBI_NEON && !HIGH_BIT_DEPTH
+		int prev = -1;
+		for (int w = 0; w < words; w++)
+			for (uint64_t m = nz[w]; m;)
 			{
-				int nrbits = r11A[idx] & 0xF;
-				uint32_t tidx = (uint32_t)idx;
-				if (nrbits < 12)
-					tidx >>= (12 - nrbits);
-				else if (nrbits > 12)
-					tidx <<= (nrbits - 12);
-				if (l[i] < 0) 
-					tidx |= 1;
-				//x264_log(h, X264_LOG_ERROR, "DCT ENC: val=%d skip=%d last=%d -> sym=%x (bits: %x, len: %d)\n", val, skip, i==lastnonzero, idx, tidx, nrbits);
-				bs_write(s, nrbits, tidx);
-				skip = 0;
-				goto end;
+				const int n = __builtin_ctzll(m) >> 2;
+				const int i = 16 * w + n;
+				m &= ~(0xfULL << (4 * n));
+				encode_dct_coef(s, r11A, r11B, reftable, l[i], i - prev - 1, i == lastnonzero);
+				prev = i;
 			}
-			int newskip = skip - r11B[(val | (((i == lastnonzero) ? 1 : 0) << 6)) + 0x80];
-			if (newskip >= 0)
-			{
-				idx = reftable[val][newskip][(i == lastnonzero) ? 1 : 0];
-				if (idx >= 0)
-				{
-					{
-					int esc_idx = reftable[0][0][0];
-					int esc_nrbits = r11A[esc_idx] & 0xF;
-					uint32_t esc_tidx = (uint32_t)esc_idx;
-					if (esc_nrbits < 12)
-						esc_tidx >>= (12 - esc_nrbits);
-					else if (esc_nrbits > 12)
-						esc_tidx <<= (esc_nrbits - 12);
-					bs_write(s, esc_nrbits, esc_tidx);
-				}
-					bs_write1(s, 1);
-					bs_write1(s, 0);
-					int nrbits = r11A[idx] & 0xF;
-					uint32_t tidx = (uint32_t)idx;
-					if (nrbits < 12)
-						tidx >>= (12 - nrbits);
-					else if (nrbits > 12)
-						tidx <<= (nrbits - 12);
-					if (l[i] < 0)
-						tidx |= 1;
-					bs_write(s, nrbits, tidx);
-					skip = 0;
-					goto end;
-				}
-			}
-		}
-		int newval = val - r11B[skip | (((i == lastnonzero) ? 1 : 0) << 6)];
-		if (newval >= 0 && newval <= 31)
+#else
+		int skip = 0;
+		for (int i = 0; i <= lastnonzero; i++)
 		{
-			int idx = reftable[newval][skip][(i == lastnonzero) ? 1 : 0];
-			if (idx >= 0)
+			if (l[i] == 0)
 			{
-				{
-					int esc_idx = reftable[0][0][0];
-					int esc_nrbits = r11A[esc_idx] & 0xF;
-					uint32_t esc_tidx = (uint32_t)esc_idx;
-					if (esc_nrbits < 12)
-						esc_tidx >>= (12 - esc_nrbits);
-					else if (esc_nrbits > 12)
-						esc_tidx <<= (esc_nrbits - 12);
-					bs_write(s, esc_nrbits, esc_tidx);
-				}
-				bs_write1(s, 0);
-				int nrbits = r11A[idx] & 0xF;
-				uint32_t tidx = (uint32_t)idx;
-				if (nrbits < 12)
-					tidx >>= (12 - nrbits);
-				else if (nrbits > 12)
-					tidx <<= (nrbits - 12);
-				if (l[i] < 0) 
-					tidx |= 1;
-				bs_write(s, nrbits, tidx);
-				skip = 0;
-				goto end;
+				skip++;
+				continue;
 			}
+			encode_dct_coef(s, r11A, r11B, reftable, l[i], skip, i == lastnonzero);
+			skip = 0;
 		}
-		//This is easiest way of writing the DCT, but also costs the most bits
-explicit:
-		{
-			int esc_idx = reftable[0][0][0];
-			int esc_nrbits = r11A[esc_idx] & 0xF;
-			uint32_t esc_tidx = (uint32_t)esc_idx;
-			if (esc_nrbits < 12)
-				esc_tidx >>= (12 - esc_nrbits);
-			else if (esc_nrbits > 12)
-				esc_tidx <<= (esc_nrbits - 12);
-			bs_write(s, esc_nrbits, esc_tidx);
-		}
-		bs_write1(s, 1);
-		bs_write1(s, 1);
-		if (i == lastnonzero)
-			bs_write1(s, 1);
-		else
-			bs_write1(s, 0);
-		bs_write(s, 6, skip);
-		skip = 0;
-		bs_write(s, 12, l[i] & 0xFFF);
-	end:
-		if (i == lastnonzero) 
-			break;
+#endif
 	}
 #if !RDO_SKIP_BS
 	if (x264_mobi_env.b_dctdbg)

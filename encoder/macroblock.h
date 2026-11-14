@@ -684,6 +684,83 @@ static void mobi_predict_block( x264_t *h, pixel *p_dst, int ax, int ay, int siz
                 p_dst[y*FDEC_STRIDE + x] = fill;
         return;
     }
+    /* A block that lies wholly inside the frame reads only two kinds of
+     * pixel: its row above and column to the left, and pixels of its own it
+     * has already written.  Fetch the former once each (still through
+     * mobi_pget(), with its clamping and remapping) rather than for every
+     * pixel that uses them, and read the latter straight from p_dst, which is
+     * where mobi_pget() finds them when no clamping applies.  (Mode 8, which
+     * the encoder never selects, is left to the general code below.) */
+    if( ((unsigned)pmode < 2 || (unsigned)(pmode - 4) < 4) &&
+        ax + size <= h->param.i_width && ay + size <= h->param.i_height )
+    {
+        /* TP(i) = MPG(i,-1), LP(j) = MPG(-1,j); the ranges each mode touches */
+        static const int8_t t_first[8] = { 0, 1, 1, 1, 1, -1, -1, -1 };
+        static const int8_t l_first[8] = { 1, 0, 1, 1, 0, -1, -1, -1 };
+        int top[16], left[16];
+#define TP(i) top[(i)+1]
+#define LP(j) left[(j)+1]
+        const int t_last = pmode == 5 ? size - 2 : size - 1;
+        const int l_last = pmode == 6 ? size - 2 : size - 1;
+        for( int i = t_first[pmode]; i <= t_last; i++ )
+            TP(i) = MPG(i, -1);
+        for( int j = l_first[pmode]; j <= l_last; j++ )
+            LP(j) = MPG(-1, j);
+        if( pmode == 4 )
+            /* below the block the left column repeats its last pixel */
+            for( int j = size; j <= size + (size-1)/2 + 1; j++ )
+                LP(j) = LP(size-1);
+#define PD(x,y) p_dst[(y)*FDEC_STRIDE + (x)]
+        for( int y = 0; y < size; y++ )
+            for( int x = 0; x < size; x++ )
+            {
+                int val;
+                switch( pmode )
+                {
+                case 0:  val = TP(x); break;
+                case 1:  val = LP(y); break;
+                case 4:
+                    if( (x % 2) == 0 )
+                        val = mobi_half( LP(y + x/2), LP(y + x/2 + 1) );
+                    else
+                        val = mobi_half3( LP(y + x/2), LP(y + x/2 + 1), LP(y + x/2 + 2) );
+                    break;
+                case 5:
+                    if( x == 0 )
+                        val = mobi_half( LP(y-1), LP(y) );
+                    else if( y == 0 )
+                        val = mobi_half3( x == 1 ? LP(0) : TP(x-3), TP(x-2), TP(x-1) );
+                    else if( x == 1 )
+                        val = mobi_half3( LP(y-2), LP(y-1), LP(y) );
+                    else
+                        val = PD(x-2, y-1);
+                    break;
+                case 6:
+                    if( y == 0 )
+                        val = mobi_half( TP(x-1), TP(x) );
+                    else if( x == 0 )
+                        val = mobi_half3( y == 1 ? TP(0) : LP(y-3), LP(y-2), LP(y-1) );
+                    else if( y == 1 )
+                        val = mobi_half3( TP(x-2), TP(x-1), TP(x) );
+                    else
+                        val = PD(x-1, y-2);
+                    break;
+                default: /* 7 */
+                    if( x && y )
+                        val = PD(x-1, y-1);
+                    else
+                        val = mobi_half3( x == 0 ? LP(y) : TP(x-2),
+                                          x == 0 ? LP(y-1) : TP(x-1),
+                                          y == 0 ? TP(x) : LP(y-2) );
+                    break;
+                }
+                PD(x, y) = val;
+            }
+#undef PD
+#undef TP
+#undef LP
+        return;
+    }
     for( int y = 0; y < size; y++ )
     {
         for( int x = 0; x < size; x++ )
