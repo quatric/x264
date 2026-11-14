@@ -29,6 +29,7 @@
 
 #include "set.h"
 #include "analyse.h"
+#include "mobi_ratecost.h"
 #include "ratecontrol.h"
 #include "macroblock.h"
 #include "me.h"
@@ -1713,6 +1714,7 @@ x264_t *x264_encoder_open( x264_param_t *param, void *api )
     CHECKED_MALLOCZERO( h, sizeof(x264_t) );
 
     x264_mobi_env_init();
+    mobi_ratecost_init();
 
     /* Create a copy of param */
     memcpy( &h->param, param, sizeof(x264_param_t) );

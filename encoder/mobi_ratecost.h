@@ -34,6 +34,7 @@
 #define mobi_sad_rate_8x8_core x264_template(mobi_sad_rate_8x8_core)
 #define mobi_rescore_4x4       x264_template(mobi_rescore_4x4)
 #define mobi_rescore_8x8       x264_template(mobi_rescore_8x8)
+#define mobi_ratecost_init     x264_template(mobi_ratecost_init)
 
 /* mf/iq are the flat per-QP forward-MF / inverse-quant tables (16 entries
  * for 4x4, 64 for 8x8) at the exact retail DLL addresses:
@@ -56,11 +57,13 @@ int mobi_sad_rate_8x8_core(
     int qp, int lambda, int is_keyframe, const uint16_t *mf, int fwd_offset,
     int fwd_shift, const int16_t *iq, int inv_shift, int sub_idx, int32_t *flag_ptr );
 
-/* Convenience wrappers for shadow-scoring/logging call sites: build the
- * quant tables internally (see mobi_build_quant_4x4/8x8 in mobi_ratecost.c)
- * and take src/pred at a single shared stride -- callers with mismatched
+/* Convenience wrappers for the re-scoring call sites: use the quant tables
+ * mobi_ratecost_init() built (see mobi_build_quant_4x4/8x8 in mobi_ratecost.c;
+ * an encoder calls it when it opens, and without it the tables are built per
+ * call) and take src/pred at a single shared stride -- callers with mismatched
  * FENC_STRIDE/FDEC_STRIDE must copy into tightly-packed local buffers first,
  * since the retail kernel itself is only ever called with matched strides. */
+void mobi_ratecost_init( void );
 int mobi_rescore_4x4( const uint8_t *src, const uint8_t *pred, int stride,
                        int qp, int lambda, int is_keyframe );
 int mobi_rescore_8x8( const uint8_t *src, const uint8_t *pred, int stride,

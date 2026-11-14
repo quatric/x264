@@ -33,6 +33,10 @@
 #include "mobi_ratecost.h"
 #include "rdo.c"
 
+/* Enough for every candidate the Mobiclip re-scoring looks at in one
+ * macroblock; anything beyond it is simply not remembered. */
+#define MOBI_MEMO_SIZE 64
+
 typedef struct
 {
     x264_me_t me16x16;
@@ -118,6 +122,16 @@ typedef struct
 
     int b_direct_available;
     int b_early_terminate;
+
+    /* Retail Mobiclip costs already worked out for this macroblock, see
+     * mobi_retail_cost(). */
+    int i_mobi_memo;
+    struct
+    {
+        const pixel *ref;
+        const x264_weight_t *weight;
+        int mv, qp, lambda, cost;
+    } mobi_memo[MOBI_MEMO_SIZE];
 
 } x264_mb_analysis_t;
 
@@ -295,6 +309,8 @@ static void mb_analyse_init_qp( x264_t *h, x264_mb_analysis_t *a, int qp )
 static void mb_analyse_init( x264_t *h, x264_mb_analysis_t *a, int qp )
 {
     int subme = h->param.analyse.i_subpel_refine - (h->sh.i_type == SLICE_TYPE_B);
+
+    a->i_mobi_memo = 0;
 
     /* mbrd == 1 -> RD mode decision */
     /* mbrd == 2 -> RD refinement */
@@ -958,6 +974,10 @@ static void mb_analyse_intra( x264_t *h, x264_mb_analysis_t *a, int i_satd_inter
                 int qp = mobi_qp( h, a->i_qp );
                 int is_kf = h->sh.i_type == SLICE_TYPE_I;
                 int retail_best_cost = INT_MAX, retail_best_mode = predict_mode[0];
+                /* The cost is a function of the predicted pixels alone, and in
+                 * flat areas several modes predict the very same block. */
+                uint8_t seen_p4[9][16];
+                int seen_cost[9], i_seen = 0;
                 for( const int8_t *sweep = predict_mode; *sweep >= 0; sweep++ )
                 {
                     int mode = *sweep;
@@ -966,7 +986,22 @@ static void mb_analyse_intra( x264_t *h, x264_mb_analysis_t *a, int i_satd_inter
                     for( int yy = 0; yy < 4; yy++ )
                         for( int xx = 0; xx < 4; xx++ )
                             p4[yy*4+xx] = p_dst_by[yy*FDEC_STRIDE+xx];
-                    int cost = mobi_rescore_4x4( s4, p4, 4, qp, a->i_lambda, is_kf );
+                    int cost = -1;
+                    for( int i = 0; i < i_seen; i++ )
+                        if( !memcmp( seen_p4[i], p4, 16 ) )
+                        {
+                            cost = seen_cost[i];
+                            break;
+                        }
+                    if( cost < 0 )
+                    {
+                        cost = mobi_rescore_4x4( s4, p4, 4, qp, a->i_lambda, is_kf );
+                        if( i_seen < 9 )
+                        {
+                            memcpy( seen_p4[i_seen], p4, 16 );
+                            seen_cost[i_seen++] = cost;
+                        }
+                    }
                     if( cost < retail_best_cost ) { retail_best_cost = cost; retail_best_mode = mode; }
                 }
                 h->predict_4x4[retail_best_mode]( p_dst_by );
@@ -1431,6 +1466,78 @@ static void mb_analyse_inter_p16x16( x264_t *h, x264_mb_analysis_t *a )
     }
 }
 
+#if !HIGH_BIT_DEPTH
+/* Retail Mobiclip's SAD-rate cost (mobi_ratecost.c) for one inter block of
+ * size w x h (multiples of 8, no deeper than 8x8 -- PSUB8x8 sub-partitions
+ * are out of scope, see the P16x16/partition re-score call sites) predicted
+ * from m's reference with the vector (mvx,mvy): retail's per-8x8 cost, summed
+ * over the block.
+ *
+ * The cost of an 8x8 block depends only on where it is, which reference and
+ * vector predict it, and the quantizer and lambda, and the re-scoring asks
+ * about the same block and vector again and again -- the zero vector and the
+ * predictor are candidates at every partition size, and each partition is
+ * scored once more when the split is chosen.  So each answer is remembered
+ * for the rest of the macroblock. */
+static int mobi_retail_cost( x264_t *h, x264_mb_analysis_t *a, x264_me_t *m, const pixel *fenc,
+                             int mvx, int mvy, int w, int hh, int qp, int lambda )
+{
+    const int mv = (mvx & 0xffff) | (mvy << 16);
+    int cost[4], total = 0, n = 0, b_miss = 0;
+
+    for( int oy = 0; oy < hh; oy += 8 )
+        for( int ox = 0; ox < w; ox += 8, n++ )
+        {
+            const pixel *ref = m->p_fref[0] + oy*m->i_stride[0] + ox;
+            cost[n] = -1;
+            for( int i = 0; i < a->i_mobi_memo; i++ )
+                if( a->mobi_memo[i].ref == ref && a->mobi_memo[i].mv == mv &&
+                    a->mobi_memo[i].weight == m->weight && a->mobi_memo[i].qp == qp &&
+                    a->mobi_memo[i].lambda == lambda )
+                {
+                    cost[n] = a->mobi_memo[i].cost;
+                    break;
+                }
+            b_miss |= cost[n] < 0;
+        }
+
+    if( b_miss )
+    {
+        ALIGNED_ARRAY_16( pixel, buf, [16*16] );
+        h->mc.mc_luma( buf, w, m->p_fref, m->i_stride[0], mvx, mvy, w, hh, m->weight );
+        n = 0;
+        for( int oy = 0; oy < hh; oy += 8 )
+            for( int ox = 0; ox < w; ox += 8, n++ )
+            {
+                if( cost[n] >= 0 )
+                    continue;
+                uint8_t s8[64], p8[64];
+                for( int yy = 0; yy < 8; yy++ )
+                    for( int xx = 0; xx < 8; xx++ )
+                    {
+                        s8[yy*8+xx] = fenc[(oy+yy)*FENC_STRIDE + ox+xx];
+                        p8[yy*8+xx] = buf[(oy+yy)*w + ox+xx];
+                    }
+                cost[n] = mobi_rescore_8x8( s8, p8, 8, qp, lambda, 0 );
+                if( a->i_mobi_memo < MOBI_MEMO_SIZE )
+                {
+                    int i = a->i_mobi_memo++;
+                    a->mobi_memo[i].ref    = m->p_fref[0] + oy*m->i_stride[0] + ox;
+                    a->mobi_memo[i].weight = m->weight;
+                    a->mobi_memo[i].mv     = mv;
+                    a->mobi_memo[i].qp     = qp;
+                    a->mobi_memo[i].lambda = lambda;
+                    a->mobi_memo[i].cost   = cost[n];
+                }
+            }
+    }
+
+    for( int i = 0; i < n; i++ )
+        total += cost[i];
+    return total;
+}
+#endif
+
 static void mb_analyse_inter_p8x8_mixed_ref( x264_t *h, x264_mb_analysis_t *a )
 {
     x264_me_t m;
@@ -1579,16 +1686,8 @@ static void mb_analyse_inter_p8x8( x264_t *h, x264_mb_analysis_t *a )
                 if( mvx < h->mb.mv_min_spel[0] || mvx > h->mb.mv_max_spel[0] ||
                     mvy < h->mb.mv_min_spel[1] || mvy > h->mb.mv_max_spel[1] )
                     continue;
-                ALIGNED_ARRAY_16( pixel, pred_buf, [8*8] );
-                h->mc.mc_luma( pred_buf, 8, m->p_fref, m->i_stride[0], mvx, mvy, 8, 8, m->weight );
-                uint8_t s8[64], p8[64];
-                for( int yy = 0; yy < 8; yy++ )
-                    for( int xx = 0; xx < 8; xx++ )
-                    {
-                        s8[yy*8+xx] = p_fenc[0][(8*y8+yy)*FENC_STRIDE + 8*x8+xx];
-                        p8[yy*8+xx] = pred_buf[yy*8+xx];
-                    }
-                int total = mobi_rescore_8x8( s8, p8, 8, qp, a->i_lambda, 0 );
+                int total = mobi_retail_cost( h, a, m, p_fenc[0] + 8*y8*FENC_STRIDE + 8*x8,
+                                              mvx, mvy, 8, 8, qp, a->i_lambda );
                 if( total < best_retail ) { best_retail = total; best_idx = c; }
             }
             if( best_idx != 0 )
@@ -3061,33 +3160,6 @@ static inline void mb_analyse_qp_rd( x264_t *h, x264_mb_analysis_t *a )
     }
 }
 
-#if !HIGH_BIT_DEPTH
-/* Retail Mobiclip's SAD-rate cost (mobi_ratecost.c) for one inter block of
- * size w x h (multiples of 8, no deeper than 8x8 -- PSUB8x8 sub-partitions
- * are out of scope, see the P16x16/partition re-score call sites), built by
- * motion-compensating m's already-found MV and summing retail's per-8x8
- * cost over the block. */
-static int mobi_retail_block_cost( x264_t *h, x264_me_t *m, const pixel *fenc, int fenc_stride,
-                                    int w, int hh, int qp, int lambda )
-{
-    ALIGNED_ARRAY_16( pixel, buf, [16*16] );
-    h->mc.mc_luma( buf, w, m->p_fref, m->i_stride[0], m->mv[0], m->mv[1], w, hh, m->weight );
-    int total = 0;
-    for( int oy = 0; oy < hh; oy += 8 )
-        for( int ox = 0; ox < w; ox += 8 )
-        {
-            uint8_t s8[64], p8[64];
-            for( int yy = 0; yy < 8; yy++ )
-                for( int xx = 0; xx < 8; xx++ )
-                {
-                    s8[yy*8+xx] = fenc[(oy+yy)*fenc_stride + ox+xx];
-                    p8[yy*8+xx] = buf[(oy+yy)*w + ox+xx];
-                }
-            total += mobi_rescore_8x8( s8, p8, 8, qp, lambda, 0 );
-        }
-    return total;
-}
-#endif
 
 /*****************************************************************************
  * x264_macroblock_analyse:
@@ -3295,22 +3367,8 @@ skip_analysis:
                     if( mvx < h->mb.mv_min_spel[0] || mvx > h->mb.mv_max_spel[0] ||
                         mvy < h->mb.mv_min_spel[1] || mvy > h->mb.mv_max_spel[1] )
                         continue;
-                    ALIGNED_ARRAY_16( pixel, pred_buf, [16*16] );
-                    h->mc.mc_luma( pred_buf, 16, analysis.l0.me16x16.p_fref, analysis.l0.me16x16.i_stride[0],
-                                   mvx, mvy, 16, 16, analysis.l0.me16x16.weight );
-                    int total = 0;
-                    for( int b8 = 0; b8 < 4; b8++ )
-                    {
-                        int ox = (b8&1)*8, oy = (b8>>1)*8;
-                        uint8_t s8[64], p8[64];
-                        for( int yy = 0; yy < 8; yy++ )
-                            for( int xx = 0; xx < 8; xx++ )
-                            {
-                                s8[yy*8+xx] = h->mb.pic.p_fenc[0][(oy+yy)*FENC_STRIDE + ox+xx];
-                                p8[yy*8+xx] = pred_buf[(oy+yy)*16 + ox+xx];
-                            }
-                        total += mobi_rescore_8x8( s8, p8, 8, qp, analysis.i_lambda, 0 );
-                    }
+                    int total = mobi_retail_cost( h, &analysis, &analysis.l0.me16x16, h->mb.pic.p_fenc[0],
+                                                  mvx, mvy, 16, 16, qp, analysis.i_lambda );
                     if( total < best_retail ) { best_retail = total; best_idx = c; }
                 }
                 if( best_idx != 0 )
@@ -3411,23 +3469,24 @@ skip_analysis:
              * off, which is this fork's mobiclip default). */
             if( h->param.i_mobiclip && !(flags & X264_ANALYSE_PSUB8x8) )
             {
+#define MOBI_MV_OF( m ) (m)->mv[0], (m)->mv[1]
                 int qp = mobi_qp( h, h->mb.i_qp );
                 int lambda = analysis.i_lambda;
                 pixel *fenc = h->mb.pic.p_fenc[0];
 
-                int best_cost = mobi_retail_block_cost( h, &analysis.l0.me16x16, fenc, FENC_STRIDE, 16, 16, qp, lambda );
+                int best_cost = mobi_retail_cost( h, &analysis, &analysis.l0.me16x16, fenc, MOBI_MV_OF( &analysis.l0.me16x16 ), 16, 16, qp, lambda );
                 int best_type = P_L0, best_part = D_16x16;
 
                 if( analysis.l0.i_cost16x8 < COST_MAX )
                 {
-                    int c = mobi_retail_block_cost( h, &analysis.l0.me16x8[0], fenc, FENC_STRIDE, 16, 8, qp, lambda )
-                          + mobi_retail_block_cost( h, &analysis.l0.me16x8[1], fenc + 8*FENC_STRIDE, FENC_STRIDE, 16, 8, qp, lambda );
+                    int c = mobi_retail_cost( h, &analysis, &analysis.l0.me16x8[0], fenc, MOBI_MV_OF( &analysis.l0.me16x8[0] ), 16, 8, qp, lambda )
+                          + mobi_retail_cost( h, &analysis, &analysis.l0.me16x8[1], fenc + 8*FENC_STRIDE, MOBI_MV_OF( &analysis.l0.me16x8[1] ), 16, 8, qp, lambda );
                     if( c < best_cost ) { best_cost = c; best_type = P_L0; best_part = D_16x8; }
                 }
                 if( analysis.l0.i_cost8x16 < COST_MAX )
                 {
-                    int c = mobi_retail_block_cost( h, &analysis.l0.me8x16[0], fenc, FENC_STRIDE, 8, 16, qp, lambda )
-                          + mobi_retail_block_cost( h, &analysis.l0.me8x16[1], fenc + 8, FENC_STRIDE, 8, 16, qp, lambda );
+                    int c = mobi_retail_cost( h, &analysis, &analysis.l0.me8x16[0], fenc, MOBI_MV_OF( &analysis.l0.me8x16[0] ), 8, 16, qp, lambda )
+                          + mobi_retail_cost( h, &analysis, &analysis.l0.me8x16[1], fenc + 8, MOBI_MV_OF( &analysis.l0.me8x16[1] ), 8, 16, qp, lambda );
                     if( c < best_cost ) { best_cost = c; best_type = P_L0; best_part = D_8x16; }
                 }
                 if( analysis.l0.i_cost8x8 < COST_MAX )
@@ -3436,7 +3495,7 @@ skip_analysis:
                     for( int i8 = 0; i8 < 4; i8++ )
                     {
                         int ox = (i8&1)*8, oy = (i8>>1)*8;
-                        c += mobi_retail_block_cost( h, &analysis.l0.me8x8[i8], fenc + oy*FENC_STRIDE + ox, FENC_STRIDE, 8, 8, qp, lambda );
+                        c += mobi_retail_cost( h, &analysis, &analysis.l0.me8x8[i8], fenc + oy*FENC_STRIDE + ox, MOBI_MV_OF( &analysis.l0.me8x8[i8] ), 8, 8, qp, lambda );
                     }
                     if( c < best_cost ) { best_cost = c; best_type = P_L0; best_part = D_8x8; }
                 }

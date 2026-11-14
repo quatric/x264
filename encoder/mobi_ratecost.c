@@ -360,29 +360,61 @@ int mobi_sad_rate_4x4_core(
     return initial_sse;
 }
 
+/* The flat tables for every quantizer the bitstream can carry, built once by
+ * mobi_ratecost_init() rather than for each block scored. */
+#define MOBI_QP_COUNT 64
+typedef struct
+{
+    uint16_t mf[64];
+    int16_t  iq[64];
+    int      fwd_offset, fwd_shift, inv_shift;
+} mobi_quant_t;
+static mobi_quant_t mobi_quant4[MOBI_QP_COUNT], mobi_quant8[MOBI_QP_COUNT];
+
+void mobi_ratecost_init( void )
+{
+    for( int qp = 0; qp < MOBI_QP_COUNT; qp++ )
+    {
+        mobi_quant_t q4, q8;
+        mobi_build_quant_4x4( qp, q4.mf, q4.iq, &q4.fwd_offset, &q4.fwd_shift, &q4.inv_shift );
+        mobi_build_quant_8x8( qp, q8.mf, q8.iq, &q8.fwd_offset, &q8.fwd_shift, &q8.inv_shift );
+        /* every caller builds the same tables, so concurrent calls are harmless */
+        mobi_quant4[qp] = q4;
+        mobi_quant8[qp] = q8;
+    }
+}
+
 int mobi_rescore_4x4( const uint8_t *src, const uint8_t *pred, int stride,
                        int qp, int lambda, int is_keyframe )
 {
-    uint16_t mf[16]; int16_t iq[16];
-    int fwd_offset, fwd_shift, inv_shift;
-    mobi_build_quant_4x4( qp, mf, iq, &fwd_offset, &fwd_shift, &inv_shift );
+    mobi_quant_t local;
+    const mobi_quant_t *q = &mobi_quant4[qp & (MOBI_QP_COUNT - 1)];
+    if( qp < 0 || qp >= MOBI_QP_COUNT || !q->fwd_shift )
+    {
+        mobi_build_quant_4x4( qp, local.mf, local.iq, &local.fwd_offset, &local.fwd_shift, &local.inv_shift );
+        q = &local;
+    }
     uint8_t workspace[0x60];
     int32_t flag = 0;
     return mobi_sad_rate_4x4_core( src, pred, stride, workspace, qp, lambda,
-                                    is_keyframe, mf, fwd_offset, fwd_shift,
-                                    iq, inv_shift, 1, &flag );
+                                    is_keyframe, q->mf, q->fwd_offset, q->fwd_shift,
+                                    q->iq, q->inv_shift, 1, &flag );
 }
 int mobi_rescore_8x8( const uint8_t *src, const uint8_t *pred, int stride,
                        int qp, int lambda, int is_keyframe )
 {
-    uint16_t mf[64]; int16_t iq[64];
-    int fwd_offset, fwd_shift, inv_shift;
-    mobi_build_quant_8x8( qp, mf, iq, &fwd_offset, &fwd_shift, &inv_shift );
+    mobi_quant_t local;
+    const mobi_quant_t *q = &mobi_quant8[qp & (MOBI_QP_COUNT - 1)];
+    if( qp < 0 || qp >= MOBI_QP_COUNT || !q->fwd_shift )
+    {
+        mobi_build_quant_8x8( qp, local.mf, local.iq, &local.fwd_offset, &local.fwd_shift, &local.inv_shift );
+        q = &local;
+    }
     uint8_t workspace[0x180];
     int32_t flag = 0;
     return mobi_sad_rate_8x8_core( src, pred, stride, workspace, qp, lambda,
-                                    is_keyframe, mf, fwd_offset, fwd_shift,
-                                    iq, inv_shift, 1, &flag );
+                                    is_keyframe, q->mf, q->fwd_offset, q->fwd_shift,
+                                    q->iq, q->inv_shift, 1, &flag );
 }
 
 int mobi_sad_rate_8x8_core(
