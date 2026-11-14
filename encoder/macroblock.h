@@ -28,6 +28,7 @@
 #define X264_ENCODER_MACROBLOCK_H
 
 #include "common/macroblock.h"
+#include "mobi_neon.h"
 
 /* ---------------------------------------------------------------------------
  * Mobiclip transform / quantization.
@@ -97,14 +98,21 @@ static ALWAYS_INLINE int mobi_qp( x264_t *h, int i_qp )
     return x264_clip3( i_qp + 6 * extra, 12, 63 );
 }
 
-static ALWAYS_INLINE int mobi_dq4( int q, int raster )
+/* The scale tables above laid out flat for one quantizer, so the block loops
+ * index them by position alone.  mobi_ratecost_init() fills one entry per
+ * quantizer when an encoder opens; mobi_qp() only ever yields 12..63. */
+#define MOBI_QP_COUNT 64
+typedef struct
 {
-    return (int)mobi_dequant4_scale[q%6][mobi_scale_idx4[raster]] << (q/6);
-}
-static ALWAYS_INLINE int mobi_dq8( int q, int raster )
-{
-    return (int)mobi_dequant8_scale[q%6][mobi_scale_idx8[raster]] << (q/6 - 2);
-}
+    uint16_t mf[64];    /* forward scale, raster order */
+    int16_t  iq[64];    /* inverse scale, before its shift */
+    int16_t  dq[64];    /* inverse scale with its shift applied (0 where the shift is negative) */
+    int16_t  dq_t[64];  /* dq, transposed */
+    int      fwd_offset, fwd_shift, inv_shift;
+} mobi_quant_t;
+#define mobi_quant4 x264_template(mobi_quant4)
+#define mobi_quant8 x264_template(mobi_quant8)
+extern mobi_quant_t mobi_quant4[MOBI_QP_COUNT], mobi_quant8[MOBI_QP_COUNT];
 
 /* Decoder-exact inverse transforms (mobiclip.c inverse4()/idct()).  Used for
  * chroma 8x8 reconstruction so the encoder's reference matches the decoder
@@ -161,6 +169,93 @@ static ALWAYS_INLINE void mobi_add8x8_idct8( pixel *p_dst, int *mat )
             p_dst[y*FDEC_STRIDE+x] = x264_clip_pixel( p_dst[y*FDEC_STRIDE+x] + (mat[y*8+x] >> 6) );
     }
 }
+#if MOBI_NEON && !HIGH_BIT_DEPTH
+/* mobi_inverse4() across four vectors, one transform per lane */
+static ALWAYS_INLINE void mobi_inverse4_neon( int32x4_t r[4] )
+{
+    const int32x4_t a = vaddq_s32( r[0], r[2] ), b = vsubq_s32( r[0], r[2] );
+    const int32x4_t c = vaddq_s32( r[1], vshrq_n_s32( r[3], 1 ) );
+    const int32x4_t d = vsubq_s32( vshrq_n_s32( r[1], 1 ), r[3] );
+    r[0] = vaddq_s32( a, c );
+    r[1] = vaddq_s32( b, d );
+    r[2] = vsubq_s32( b, d );
+    r[3] = vsubq_s32( a, c );
+}
+/* mobi_idct8_1d() across eight vectors, one transform per lane */
+static ALWAYS_INLINE void mobi_idct8_neon( int32x4_t a[8] )
+{
+    int32x4_t t[4] = { a[0], a[2], a[4], a[6] };
+    mobi_inverse4_neon( t );
+    const int32x4_t e = vsubq_s32( vsubq_s32( vaddq_s32( a[7], a[1] ), a[3] ), vshrq_n_s32( a[3], 1 ) );
+    const int32x4_t f = vaddq_s32( vaddq_s32( vsubq_s32( a[7], a[1] ), a[5] ), vshrq_n_s32( a[5], 1 ) );
+    const int32x4_t g = vsubq_s32( vsubq_s32( vsubq_s32( a[5], a[3] ), a[7] ), vshrq_n_s32( a[7], 1 ) );
+    const int32x4_t k = vaddq_s32( vaddq_s32( vaddq_s32( a[5], a[3] ), a[1] ), vshrq_n_s32( a[1], 1 ) );
+    const int32x4_t x3 = vaddq_s32( g, vshrq_n_s32( k, 2 ) );
+    const int32x4_t x2 = vaddq_s32( e, vshrq_n_s32( f, 2 ) );
+    const int32x4_t x1 = vsubq_s32( vshrq_n_s32( e, 2 ), f );
+    const int32x4_t x0 = vsubq_s32( k, vshrq_n_s32( g, 2 ) );
+    a[0] = vaddq_s32( t[0], x0 );  a[1] = vaddq_s32( t[1], x1 );
+    a[2] = vaddq_s32( t[2], x2 );  a[3] = vaddq_s32( t[3], x3 );
+    a[4] = vsubq_s32( t[3], x3 );  a[5] = vsubq_s32( t[2], x2 );
+    a[6] = vsubq_s32( t[1], x1 );  a[7] = vsubq_s32( t[0], x0 );
+}
+#endif
+
+/* Dequantize an 8x8 block of levels (raster order) with the decoder's rule,
+ * level * (DQ[q%6][pos] << (q/6 - 2)), and add its inverse transform to p_dst.
+ * The products go into 32 bits because level*step overflows int16, and the
+ * transform is the decoder's own: x264's add8x8_idct8 normalises differently,
+ * which accumulates as drift across P-frames. */
+static ALWAYS_INLINE void mobi_dequant_add8x8( pixel *p_dst, const dctcoef *dct, const mobi_quant_t *t )
+{
+#if MOBI_NEON && !HIGH_BIT_DEPTH
+    /* The scalar code transforms the rows, transposes, transforms the rows
+     * again and adds.  Here a vector holds one column, so each pass runs
+     * across the vectors and the transposes sit around the passes instead.
+     * The residual is narrowed with saturation before the add: anything that
+     * saturates clips to 0 or 255 either way. */
+    int16x8_t l[8];
+    int32x4_t lo[8], hi[8];
+    for( int i = 0; i < 8; i++ )
+        l[i] = vld1q_s16( dct + 8*i );
+    mobi_transpose8_neon( l );
+    for( int i = 0; i < 8; i++ )
+    {
+        const int16x8_t dq = vld1q_s16( t->dq_t + 8*i );
+        lo[i] = vmull_s16( vget_low_s16( l[i] ), vget_low_s16( dq ) );
+        hi[i] = vmull_high_s16( l[i], dq );
+    }
+    lo[0] = vaddq_s32( lo[0], vsetq_lane_s32( 32, vdupq_n_s32( 0 ), 0 ) );
+    mobi_idct8_neon( lo );
+    mobi_idct8_neon( hi );
+    mobi_transpose4_s32_neon( lo );
+    mobi_transpose4_s32_neon( lo + 4 );
+    mobi_transpose4_s32_neon( hi );
+    mobi_transpose4_s32_neon( hi + 4 );
+    for( int i = 0; i < 4; i++ )
+    {
+        const int32x4_t tmp = lo[4+i];
+        lo[4+i] = hi[i];
+        hi[i] = tmp;
+    }
+    mobi_idct8_neon( lo );
+    mobi_idct8_neon( hi );
+    for( int i = 0; i < 8; i++ )
+        l[i] = vcombine_s16( vqmovn_s32( vshrq_n_s32( lo[i], 6 ) ), vqmovn_s32( vshrq_n_s32( hi[i], 6 ) ) );
+    mobi_transpose8_neon( l );
+    for( int i = 0; i < 8; i++ )
+    {
+        const int16x8_t px = vreinterpretq_s16_u16( vmovl_u8( vld1_u8( p_dst + i*FDEC_STRIDE ) ) );
+        vst1_u8( p_dst + i*FDEC_STRIDE, vqmovun_s16( vqaddq_s16( px, l[i] ) ) );
+    }
+#else
+    int mat[64];
+    for( int i = 0; i < 64; i++ )
+        mat[i] = (int)dct[i] * t->dq[i];
+    mobi_add8x8_idct8( p_dst, mat );
+#endif
+}
+
 /* Whether this macroblock's luma residual is coded 8x8.  The coefficient
  * writer gates on x264_mb_transform_8x8_allowed() as well as b_transform_8x8
  * -- a P_8x8 macroblock with sub-8x8 partitions is not allowed 8x8 even when
@@ -222,6 +317,19 @@ static ALWAYS_INLINE void mobi_transform_8pt( int16_t *p, int stride )
 
 static ALWAYS_INLINE void mobi_sub8x8_dct8( dctcoef dst[64], pixel *p_src, pixel *p_dst )
 {
+#if MOBI_NEON && !HIGH_BIT_DEPTH
+    /* One vector per row: the column pass runs across the vectors, and after a
+     * transpose so does the row pass, which leaves the result in the
+     * transposed layout the scalar code ends with. */
+    int16x8_t r[8];
+    for( int y = 0; y < 8; y++ )
+        r[y] = vreinterpretq_s16_u16( vsubl_u8( vld1_u8( p_src + y*FENC_STRIDE ), vld1_u8( p_dst + y*FDEC_STRIDE ) ) );
+    mobi_transform_8pt_neon( r );
+    mobi_transpose8_neon( r );
+    mobi_transform_8pt_neon( r );
+    for( int y = 0; y < 8; y++ )
+        vst1q_s16( dst + 8*y, r[y] );
+#else
     int16_t t[64];
     for( int y = 0; y < 8; y++ )
         for( int x = 0; x < 8; x++ )
@@ -236,10 +344,31 @@ static ALWAYS_INLINE void mobi_sub8x8_dct8( dctcoef dst[64], pixel *p_src, pixel
     for( int y = 0; y < 8; y++ )
         for( int x = 0; x < 8; x++ )
             dst[x*8+y] = t[y*8+x];
+#endif
 }
+
+#if MOBI_NEON && !HIGH_BIT_DEPTH
+/* Two rows of four pixels as eight 16-bit lanes. */
+static ALWAYS_INLINE int16x8_t mobi_load4x2_neon( const pixel *p, int stride )
+{
+    const uint32x2_t v = vset_lane_u32( M32( p + stride ), vdup_n_u32( M32( p ) ), 1 );
+    return vreinterpretq_s16_u16( vmovl_u8( vreinterpret_u8_u32( v ) ) );
+}
+#endif
 
 static ALWAYS_INLINE void mobi_sub4x4_dct( dctcoef dst[16], pixel *p_src, pixel *p_dst )
 {
+#if MOBI_NEON && !HIGH_BIT_DEPTH
+    const int16x8_t r01 = vsubq_s16( mobi_load4x2_neon( p_src, FENC_STRIDE ), mobi_load4x2_neon( p_dst, FDEC_STRIDE ) );
+    const int16x8_t r23 = vsubq_s16( mobi_load4x2_neon( p_src + 2*FENC_STRIDE, FENC_STRIDE ),
+                                     mobi_load4x2_neon( p_dst + 2*FDEC_STRIDE, FDEC_STRIDE ) );
+    int16x4_t r[4] = { vget_low_s16( r01 ), vget_high_s16( r01 ), vget_low_s16( r23 ), vget_high_s16( r23 ) };
+    mobi_transform_4pt_neon( r );
+    mobi_transpose4_neon( r );
+    mobi_transform_4pt_neon( r );
+    vst1q_s16( dst,     vcombine_s16( r[0], r[1] ) );
+    vst1q_s16( dst + 8, vcombine_s16( r[2], r[3] ) );
+#else
     int16_t t[16];
     for( int y = 0; y < 4; y++ )
         for( int x = 0; x < 4; x++ )
@@ -262,22 +391,30 @@ static ALWAYS_INLINE void mobi_sub4x4_dct( dctcoef dst[16], pixel *p_src, pixel 
         dst[2*4+y] = a - b;
         dst[3*4+y] = d - 2*c;
     }
+#endif
 }
 
 /* b_intra is accepted for call-site symmetry but unused: the reference encoder
  * uses the same (1<<shift)/3 bias for intra and inter blocks alike. */
 static ALWAYS_INLINE int mobi_quant_4x4( x264_t *h, dctcoef dct[16], int i_qp, int b_intra )
 {
-    int q = mobi_qp( h, i_qp );
-    int shift = 15 + q/6;
-    int f = (1 << shift) / 3;
-    const uint16_t *mf = mobi_quant4_scale[q%6];
-    int nz = 0;
+    const mobi_quant_t *t = &mobi_quant4[mobi_qp( h, i_qp )];
     (void)b_intra;
+#if MOBI_NEON && !HIGH_BIT_DEPTH
+    const int32x4_t f = vdupq_n_s32( t->fwd_offset ), neg_shift = vdupq_n_s32( -t->fwd_shift );
+    const int16x8_t a = mobi_quant8_neon( vld1q_s16( dct ),     vld1q_u16( t->mf ),     f, neg_shift );
+    const int16x8_t b = mobi_quant8_neon( vld1q_s16( dct + 8 ), vld1q_u16( t->mf + 8 ), f, neg_shift );
+    vst1q_s16( dct, a );
+    vst1q_s16( dct + 8, b );
+    return !!vmaxvq_u16( vreinterpretq_u16_s16( vorrq_s16( a, b ) ) );
+#else
+    int shift = t->fwd_shift;
+    int f = t->fwd_offset;
+    int nz = 0;
     for( int i = 0; i < 16; i++ )
     {
         int coef = dct[i], level;
-        int m = mf[mobi_scale_idx4[i]];
+        int m = t->mf[i];
         if( coef >= 0 )
             level =  ( ( coef * m + f) >> shift);
         else
@@ -286,20 +423,31 @@ static ALWAYS_INLINE int mobi_quant_4x4( x264_t *h, dctcoef dct[16], int i_qp, i
         nz |= level;
     }
     return !!nz;
+#endif
 }
 
 static ALWAYS_INLINE int mobi_quant_8x8( x264_t *h, dctcoef dct[64], int i_qp, int b_intra )
 {
-    int q = mobi_qp( h, i_qp );
-    int shift = 16 + q/6;
-    int f = (1 << shift) / 3;
-    const uint16_t *mf = mobi_quant8_scale[q%6];
-    int nz = 0;
+    const mobi_quant_t *t = &mobi_quant8[mobi_qp( h, i_qp )];
     (void)b_intra;
+#if MOBI_NEON && !HIGH_BIT_DEPTH
+    const int32x4_t f = vdupq_n_s32( t->fwd_offset ), neg_shift = vdupq_n_s32( -t->fwd_shift );
+    int16x8_t any = vdupq_n_s16( 0 );
+    for( int i = 0; i < 64; i += 8 )
+    {
+        const int16x8_t v = mobi_quant8_neon( vld1q_s16( dct + i ), vld1q_u16( t->mf + i ), f, neg_shift );
+        vst1q_s16( dct + i, v );
+        any = vorrq_s16( any, v );
+    }
+    return !!vmaxvq_u16( vreinterpretq_u16_s16( any ) );
+#else
+    int shift = t->fwd_shift;
+    int f = t->fwd_offset;
+    int nz = 0;
     for( int i = 0; i < 64; i++ )
     {
         int coef = dct[i], level;
-        int m = mf[mobi_scale_idx8[i]];
+        int m = t->mf[i];
         if( coef >= 0 )
             level =  ( ( coef * m + f) >> shift);
         else
@@ -308,6 +456,7 @@ static ALWAYS_INLINE int mobi_quant_8x8( x264_t *h, dctcoef dct[64], int i_qp, i
         nz |= level;
     }
     return !!nz;
+#endif
 }
 
 
@@ -735,6 +884,21 @@ static void mobi_predict_chroma_8x8( x264_t *h, int ch, int mode )
 }
 #endif
 
+#if MOBI_NEON && !HIGH_BIT_DEPTH
+/* dst[i] = src[mobi_zigzag4x4[i]] for a block held in two vectors */
+static ALWAYS_INLINE void mobi_zigzag4x4_neon( dctcoef *dst, int16x8_t c0, int16x8_t c1 )
+{
+    static const uint8_t scan[32] =
+    {
+         0, 1,  8, 9,  2, 3,  4, 5, 10,11, 16,17, 24,25, 18,19,
+        12,13,  6, 7, 14,15, 20,21, 26,27, 28,29, 22,23, 30,31
+    };
+    const uint8x16x2_t tab = {{ vreinterpretq_u8_s16( c0 ), vreinterpretq_u8_s16( c1 ) }};
+    vst1q_u8( (uint8_t*)dst,      vqtbl2q_u8( tab, vld1q_u8( scan ) ) );
+    vst1q_u8( (uint8_t*)dst + 16, vqtbl2q_u8( tab, vld1q_u8( scan + 16 ) ) );
+}
+#endif
+
 static ALWAYS_INLINE void x264_mb_encode_i4x4( x264_t *h, int p, int idx, int i_qp, int i_mode, int b_predict )
 {
     int nz;
@@ -805,6 +969,78 @@ static ALWAYS_INLINE void x264_mb_encode_i4x4( x264_t *h, int p, int idx, int i_
         return;
     }
 
+#if MOBI_NEON && !HIGH_BIT_DEPTH
+    /* Always write luma4x4 for luma, to clear stale analysis data. */
+    if( p == 0 || nz )
+        mobi_zigzag4x4_neon( h->dct.luma4x4[p*16+idx], vld1q_s16( dct4x4 ), vld1q_s16( dct4x4 + 8 ) );
+    if( nz )
+    {
+        const mobi_quant_t *t = &mobi_quant4[mobi_qp( h, i_qp )];
+        const int16x8_t px01 = mobi_load4x2_neon( p_dst, FDEC_STRIDE );
+        const int16x8_t px23 = mobi_load4x2_neon( p_dst + 2*FDEC_STRIDE, FDEC_STRIDE );
+        int16x8_t s01, s23;
+        /* Dequantize into a 32-bit matrix: level*qtab (level up to ~hundreds,
+         * qtab up to ~29<<2) overflows the int16 dct4x4 buffer, and the
+         * inverse4 row/column sums overflow it further.  The decoder uses
+         * int mat[]; mirror that exactly (this is the same fix as chroma
+         * 8x8) or large-coefficient blocks reconstruct wrong and the error
+         * drifts through P-frames as visible shearing. */
+        /* Re-quantization guard.  The Mobiclip decoder reconstructs each
+         * pixel as MinMaxTable[0x40 + prediction + (residual>>6)] with NO
+         * bounds check.  The table is 384 entries (a 0..255 ramp with 64
+         * zero/255 guard entries each side), so prediction+residual must
+         * stay in [-64,319].  DCT ringing on sharp edges (e.g. the first
+         * frame's high-contrast logo) can overshoot this; the real Wii then
+         * reads memory outside the table and the garbage cascades through
+         * intra prediction (green corruption).  Genuine streams never
+         * overshoot.  Iteratively attenuate the coefficients (AC first, then
+         * DC) and re-run the decoder-exact inverse transform until every
+         * reconstructed pixel's index is in range; worst case the block
+         * degrades to pure prediction. */
+        /* As in mobi_dequant_add8x8(), a vector holds one column of the
+         * matrix and the residual is narrowed with saturation, which leaves
+         * the range test and the clip with the same outcome. */
+        for( int mobi_pass = 0; ; mobi_pass++ )
+        {
+            int16x4_t l[4] = { vld1_s16( dct4x4 ), vld1_s16( dct4x4 + 4 ), vld1_s16( dct4x4 + 8 ), vld1_s16( dct4x4 + 12 ) };
+            int32x4_t m[4];
+            mobi_transpose4_neon( l );
+            for( int i = 0; i < 4; i++ )
+                m[i] = vmull_s16( l[i], vld1_s16( t->dq_t + 4*i ) );
+            m[0] = vaddq_s32( m[0], vsetq_lane_s32( 32, vdupq_n_s32( 0 ), 0 ) );
+            mobi_inverse4_neon( m );
+            mobi_transpose4_s32_neon( m );
+            mobi_inverse4_neon( m );
+            for( int i = 0; i < 4; i++ )
+                l[i] = vqmovn_s32( vshrq_n_s32( m[i], 6 ) );
+            mobi_transpose4_neon( l );
+            s01 = vqaddq_s16( px01, vcombine_s16( l[0], l[1] ) );
+            s23 = vqaddq_s16( px23, vcombine_s16( l[2], l[3] ) );
+            const uint16x8_t oob = vorrq_u16( vorrq_u16( vcltq_s16( s01, vdupq_n_s16( -64 ) ), vcgtq_s16( s01, vdupq_n_s16( 319 ) ) ),
+                                              vorrq_u16( vcltq_s16( s23, vdupq_n_s16( -64 ) ), vcgtq_s16( s23, vdupq_n_s16( 319 ) ) ) );
+            if( !vmaxvq_u16( oob ) || mobi_pass >= 16 )
+            {
+                /* The attenuation changed the levels; re-store the coded
+                 * coefficients so the bitstream matches the reconstruction. */
+                if( mobi_pass && p == 0 )
+                    mobi_zigzag4x4_neon( h->dct.luma4x4[p*16+idx], vld1q_s16( dct4x4 ), vld1q_s16( dct4x4 + 8 ) );
+                break;
+            }
+            int has_ac = 0;
+            for( int i = 1; i < 16; i++ ) if( dct4x4[i] ) { has_ac = 1; break; }
+            if( has_ac )
+                for( int i = 1; i < 16; i++ ) dct4x4[i] /= 2;
+            else
+                dct4x4[0] /= 2;
+        }
+        const uint32x2_t o01 = vreinterpret_u32_u8( vqmovun_s16( s01 ) );
+        const uint32x2_t o23 = vreinterpret_u32_u8( vqmovun_s16( s23 ) );
+        M32( p_dst + 0*FDEC_STRIDE ) = vget_lane_u32( o01, 0 );
+        M32( p_dst + 1*FDEC_STRIDE ) = vget_lane_u32( o01, 1 );
+        M32( p_dst + 2*FDEC_STRIDE ) = vget_lane_u32( o23, 0 );
+        M32( p_dst + 3*FDEC_STRIDE ) = vget_lane_u32( o23, 1 );
+    }
+#else
 #if !HIGH_BIT_DEPTH
     /* Always write luma4x4 in Mobiclip mode to clear stale analysis data. */
     if( h->param.i_mobiclip && p == 0 )
@@ -820,11 +1056,8 @@ static ALWAYS_INLINE void x264_mb_encode_i4x4( x264_t *h, int p, int idx, int i_
             h->dct.luma4x4[p*16+idx][zz] = dct4x4[mobi_zigzag4x4[zz]];
         if( 1 ) /* mobi dequant always for matching mobiclip decoder */
         {
-            int q = mobi_qp( h, i_qp );
-            int qtab64[16];
             /* Decoder-exact 4x4 dequant: level * (DQ[q%6][pos] << (q/6)). */
-            for( int i = 0; i < 16; i++ )
-                qtab64[i] = mobi_dq4( q, i );
+            const int16_t *qtab64 = mobi_quant4[mobi_qp( h, i_qp )].dq;
             /* Dequantize into a 32-bit matrix: level*qtab (level up to ~hundreds,
              * qtab up to ~29<<2) overflows the int16 dct4x4 buffer, and the
              * inverse4 row/column sums overflow it further.  The decoder uses
@@ -919,6 +1152,7 @@ static ALWAYS_INLINE void x264_mb_encode_i4x4( x264_t *h, int p, int idx, int i_
             h->dctf.add4x4_idct( p_dst, dct4x4 );
         }
     }
+#endif
 }
 
 static ALWAYS_INLINE void x264_mb_encode_i8x8( x264_t *h, int p, int idx, int i_qp, int i_mode, pixel *edge, int b_predict )
@@ -984,11 +1218,7 @@ static ALWAYS_INLINE void x264_mb_encode_i8x8( x264_t *h, int p, int idx, int i_
              * decoder's own inverse transform -- level*step overflows the
              * int16 dct8x8 buffer, and x264's add8x8_idct8 normalises
              * differently, which accumulates as drift across P-frames. */
-            int q = mobi_qp( h, i_qp );
-            int mat[64];
-            for( int i = 0; i < 64; i++ )
-                mat[i] = (int)dct8x8[i] * mobi_dq8( q, i );
-            mobi_add8x8_idct8( p_dst, mat );
+            mobi_dequant_add8x8( p_dst, dct8x8, &mobi_quant8[mobi_qp( h, i_qp )] );
         }
         else
         {

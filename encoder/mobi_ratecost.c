@@ -360,95 +360,49 @@ int mobi_sad_rate_4x4_core(
     return initial_sse;
 }
 
-/* The flat tables for every quantizer the bitstream can carry, built once by
- * mobi_ratecost_init() rather than for each block scored. */
-#define MOBI_QP_COUNT 64
-typedef struct
+/* The flat tables for every quantizer the bitstream can carry (see
+ * macroblock.h), built once by mobi_ratecost_init() rather than for each block
+ * scored or coded. */
+mobi_quant_t mobi_quant4[MOBI_QP_COUNT], mobi_quant8[MOBI_QP_COUNT];
+/* mods_scan_4x4 (with the DC position in front) and mods_scan_8x8 as bytes */
+static uint8_t mobi_scan4_u8[16], mobi_scan8_u8[64];
+
+static void mobi_fill_dq( mobi_quant_t *q, int n )
 {
-    uint16_t mf[64];
-    int16_t  iq[64];
-    int      fwd_offset, fwd_shift, inv_shift;
-} mobi_quant_t;
-static mobi_quant_t mobi_quant4[MOBI_QP_COUNT], mobi_quant8[MOBI_QP_COUNT];
+    for( int y = 0; y < n; y++ )
+        for( int x = 0; x < n; x++ )
+        {
+            int v = q->inv_shift >= 0 ? q->iq[y*n+x] << q->inv_shift : 0;
+            q->dq[y*n+x] = v;
+            q->dq_t[x*n+y] = v;
+        }
+}
 
 void mobi_ratecost_init( void )
 {
+    for( int i = 0; i < 15; i++ )
+        mobi_scan4_u8[i+1] = mods_scan_4x4[i];
+    for( int i = 0; i < 64; i++ )
+        mobi_scan8_u8[i] = mods_scan_8x8[i];
     for( int qp = 0; qp < MOBI_QP_COUNT; qp++ )
     {
-        mobi_quant_t q4, q8;
+        mobi_quant_t q4 = {{0}}, q8 = {{0}};
         mobi_build_quant_4x4( qp, q4.mf, q4.iq, &q4.fwd_offset, &q4.fwd_shift, &q4.inv_shift );
         mobi_build_quant_8x8( qp, q8.mf, q8.iq, &q8.fwd_offset, &q8.fwd_shift, &q8.inv_shift );
+        mobi_fill_dq( &q4, 4 );
+        mobi_fill_dq( &q8, 8 );
         /* every caller builds the same tables, so concurrent calls are harmless */
         mobi_quant4[qp] = q4;
         mobi_quant8[qp] = q8;
     }
 }
 
-#if ARCH_AARCH64 && HAVE_NEON
-#include <arm_neon.h>
-
+#if MOBI_NEON
 /* NEON forms of the two cost kernels above, for tightly packed blocks.  They
  * follow the reference step for step and keep its arithmetic: 16-bit lanes
  * wherever the reference stores into int16_t (so the wrap-around is the
  * same), 32-bit lanes for the quantizer products, the 4x4 inverse transform's
  * rounding shift and the distortion sum. */
-
-static ALWAYS_INLINE void mobi_transpose4_neon( int16x4_t r[4] )
-{
-    const int16x4x2_t ab = vtrn_s16( r[0], r[1] );
-    const int16x4x2_t cd = vtrn_s16( r[2], r[3] );
-    const int32x2x2_t x = vtrn_s32( vreinterpret_s32_s16( ab.val[0] ), vreinterpret_s32_s16( cd.val[0] ) );
-    const int32x2x2_t y = vtrn_s32( vreinterpret_s32_s16( ab.val[1] ), vreinterpret_s32_s16( cd.val[1] ) );
-    r[0] = vreinterpret_s16_s32( x.val[0] );
-    r[1] = vreinterpret_s16_s32( y.val[0] );
-    r[2] = vreinterpret_s16_s32( x.val[1] );
-    r[3] = vreinterpret_s16_s32( y.val[1] );
-}
-
-static ALWAYS_INLINE void mobi_transpose8_neon( int16x8_t r[8] )
-{
-    const int16x8_t a0 = vtrn1q_s16( r[0], r[1] ), a1 = vtrn2q_s16( r[0], r[1] );
-    const int16x8_t a2 = vtrn1q_s16( r[2], r[3] ), a3 = vtrn2q_s16( r[2], r[3] );
-    const int16x8_t a4 = vtrn1q_s16( r[4], r[5] ), a5 = vtrn2q_s16( r[4], r[5] );
-    const int16x8_t a6 = vtrn1q_s16( r[6], r[7] ), a7 = vtrn2q_s16( r[6], r[7] );
-#define TRN32( n, x, y ) vreinterpretq_s64_s32( vtrn##n##q_s32( vreinterpretq_s32_s16( x ), vreinterpretq_s32_s16( y ) ) )
-    const int64x2_t b0 = TRN32( 1, a0, a2 ), b2 = TRN32( 2, a0, a2 );
-    const int64x2_t b1 = TRN32( 1, a1, a3 ), b3 = TRN32( 2, a1, a3 );
-    const int64x2_t b4 = TRN32( 1, a4, a6 ), b6 = TRN32( 2, a4, a6 );
-    const int64x2_t b5 = TRN32( 1, a5, a7 ), b7 = TRN32( 2, a5, a7 );
-#undef TRN32
-    r[0] = vreinterpretq_s16_s64( vtrn1q_s64( b0, b4 ) );
-    r[1] = vreinterpretq_s16_s64( vtrn1q_s64( b1, b5 ) );
-    r[2] = vreinterpretq_s16_s64( vtrn1q_s64( b2, b6 ) );
-    r[3] = vreinterpretq_s16_s64( vtrn1q_s64( b3, b7 ) );
-    r[4] = vreinterpretq_s16_s64( vtrn2q_s64( b0, b4 ) );
-    r[5] = vreinterpretq_s16_s64( vtrn2q_s64( b1, b5 ) );
-    r[6] = vreinterpretq_s16_s64( vtrn2q_s64( b2, b6 ) );
-    r[7] = vreinterpretq_s16_s64( vtrn2q_s64( b3, b7 ) );
-}
-
-/* mobi_transform_8pt_1d(), one transform per lane */
-static ALWAYS_INLINE void mobi_transform_8pt_neon( int16x8_t x[8] )
-{
-    const int16x8_t s0 = vaddq_s16( x[0], x[7] ), s1 = vaddq_s16( x[1], x[6] );
-    const int16x8_t s2 = vaddq_s16( x[2], x[5] ), s3 = vaddq_s16( x[3], x[4] );
-    const int16x8_t d0 = vsubq_s16( x[0], x[7] ), d1 = vsubq_s16( x[1], x[6] );
-    const int16x8_t d2 = vsubq_s16( x[2], x[5] ), d3 = vsubq_s16( x[3], x[4] );
-    const int16x8_t ee0 = vaddq_s16( s0, s3 ), ee1 = vaddq_s16( s1, s2 );
-    const int16x8_t eo0 = vsubq_s16( s0, s3 ), eo1 = vsubq_s16( s1, s2 );
-    const int16x8_t o0 = vaddq_s16( vaddq_s16( d0, vshrq_n_s16( d0, 1 ) ), vaddq_s16( d1, d2 ) );
-    const int16x8_t o1 = vsubq_s16( vsubq_s16( d0, d2 ), vaddq_s16( vshrq_n_s16( d2, 1 ), d3 ) );
-    const int16x8_t o2 = vsubq_s16( vaddq_s16( d0, d3 ), vaddq_s16( d1, vshrq_n_s16( d1, 1 ) ) );
-    const int16x8_t o3 = vaddq_s16( vsubq_s16( d1, d2 ), vaddq_s16( d3, vshrq_n_s16( d3, 1 ) ) );
-    x[0] = vaddq_s16( ee0, ee1 );
-    x[2] = vaddq_s16( eo0, vshrq_n_s16( eo1, 1 ) );
-    x[4] = vsubq_s16( ee0, ee1 );
-    x[6] = vsubq_s16( vshrq_n_s16( eo0, 1 ), eo1 );
-    x[1] = vaddq_s16( o0, vshrq_n_s16( o3, 2 ) );
-    x[3] = vaddq_s16( o1, vshrq_n_s16( o2, 2 ) );
-    x[5] = vsubq_s16( o2, vshrq_n_s16( o1, 2 ) );
-    x[7] = vsubq_s16( vshrq_n_s16( o0, 2 ), o3 );
-}
 
 /* mobi_inv_transform_8pt_1d(), one transform per lane */
 static ALWAYS_INLINE void mobi_inv_transform_8pt_neon( int16x8_t y[8] )
@@ -472,13 +426,41 @@ static ALWAYS_INLINE void mobi_inv_transform_8pt_neon( int16x8_t y[8] )
     y[6] = vsubq_s16( s1, d2 );  y[7] = vsubq_s16( s0, d3 );
 }
 
-/* sign(c) * ((|c| * mf + offset) >> shift), as mobi_forward_quantize() does it */
-static ALWAYS_INLINE int32x4_t mobi_quant_neon( int16x4_t c, uint16x4_t mf, int32x4_t offset, int32x4_t neg_shift )
+/* What one coded coefficient costs, as mobi_count_vlc_bits_*() look it up. */
+static ALWAYS_INLINE int mobi_vlc_cost( const uint8_t *tab, int level, int run, int is_keyframe )
 {
-    const int32x4_t c32  = vmovl_s16( c );
-    const int32x4_t sign = vshrq_n_s32( c32, 31 );
-    const int32x4_t v    = vshlq_s32( vmlaq_s32( offset, vabsq_s32( c32 ), vreinterpretq_s32_u32( vmovl_u16( mf ) ) ), neg_shift );
-    return vsubq_s32( veorq_s32( v, sign ), sign );
+    int combined = level + 0x40;
+    if( combined >= 0 && combined < 128 && run < 128 )
+    {
+        int idx = (is_keyframe * 128 + run) * 128 + combined;
+        return idx < 32768 ? tab[idx] : 28;
+    }
+    return 28;
+}
+
+/* mobi_count_vlc_bits_*() given where the non-zero levels are: nz[] holds one
+ * nibble per coefficient in scan order (16 coefficients a word), scan[] maps
+ * scan position to raster position.  Only the coded coefficients are visited;
+ * the run before each is the distance from the one before it. */
+static ALWAYS_INLINE int mobi_count_vlc_bits_neon( const int16_t *levels, const uint8_t *scan,
+                                                   const uint64_t *nz, int words, int is_keyframe )
+{
+    int prev = -1, prev_level = 0, prev_run = 0, bits = 0;
+    for( int w = 0; w < words; w++ )
+        for( uint64_t m = nz[w]; m; )
+        {
+            const int n = __builtin_ctzll( m ) >> 2;
+            const int pos = w*16 + n;
+            m &= ~(0xfULL << (4*n));
+            if( prev >= 0 )
+                bits += mobi_vlc_cost( mods_vlc_mid_8x8, prev_level, prev_run, is_keyframe );
+            prev_run = pos - prev - 1;
+            prev_level = levels[scan[pos]];
+            prev = pos;
+        }
+    if( prev < 0 )
+        return 0;
+    return bits + mobi_vlc_cost( mods_vlc_last_8x8, prev_level, prev_run, is_keyframe );
 }
 
 /* mobi_sad_rate_4x4_core() for src/pred at stride 4 */
@@ -521,7 +503,10 @@ static int mobi_sad_rate_4x4_neon( const uint8_t *src, const uint8_t *pred, int 
     }
     if( !vmaxvq_u32( vreinterpretq_u32_s32( any ) ) )
         return initial_sse;
-    const int vlc_bits = mobi_count_vlc_bits_4x4( levels, is_keyframe );
+    const int16x8_t l01 = vcombine_s16( r[0], r[1] ), l23 = vcombine_s16( r[2], r[3] );
+    const uint8x16_t coded = vcombine_u8( vmovn_u16( vtstq_s16( l01, l01 ) ), vmovn_u16( vtstq_s16( l23, l23 ) ) );
+    const uint64_t nz = mobi_nibble_mask_neon( vqtbl1q_u8( coded, vld1q_u8( mobi_scan4_u8 ) ) );
+    const int vlc_bits = mobi_count_vlc_bits_neon( levels, mobi_scan4_u8, &nz, 1, is_keyframe );
 
     /* dequantize, then the inverse transform: down the columns in 16 bits,
      * along the rows in 32 because of the rounding shift */
@@ -591,15 +576,19 @@ static int mobi_sad_rate_8x8_neon( const uint8_t *src, const uint8_t *pred, int 
     int16x8_t any = vdupq_n_s16( 0 );
     for( int i = 0; i < 8; i++ )
     {
-        const uint16x8_t mf = vld1q_u16( q->mf + 8*i );
-        r[i] = vcombine_s16( vmovn_s32( mobi_quant_neon( vget_low_s16( r[i] ),  vget_low_u16( mf ),  offset, neg_shift ) ),
-                             vmovn_s32( mobi_quant_neon( vget_high_s16( r[i] ), vget_high_u16( mf ), offset, neg_shift ) ) );
+        r[i] = mobi_quant8_neon( r[i], vld1q_u16( q->mf + 8*i ), offset, neg_shift );
         any = vorrq_s16( any, r[i] );
         vst1q_s16( levels + 8*i, r[i] );
     }
     if( !vmaxvq_u16( vreinterpretq_u16_s16( any ) ) )
         return initial_sse;
-    const int vlc_bits = mobi_count_vlc_bits_8x8( levels, is_keyframe );
+    uint8x16x4_t coded;
+    uint64_t nz[4];
+    for( int i = 0; i < 4; i++ )
+        coded.val[i] = vcombine_u8( vmovn_u16( vtstq_s16( r[2*i], r[2*i] ) ), vmovn_u16( vtstq_s16( r[2*i+1], r[2*i+1] ) ) );
+    for( int i = 0; i < 4; i++ )
+        nz[i] = mobi_nibble_mask_neon( vqtbl4q_u8( coded, vld1q_u8( mobi_scan8_u8 + 16*i ) ) );
+    const int vlc_bits = mobi_count_vlc_bits_neon( levels, mobi_scan8_u8, nz, 4, is_keyframe );
 
     /* dequantize and reconstruct: columns, then rows with the final >> 6 */
     const int16x8_t inv_shift = vdupq_n_s16( q->inv_shift );
@@ -624,9 +613,6 @@ static int mobi_sad_rate_8x8_neon( const uint8_t *src, const uint8_t *pred, int 
     const int total_cost = vaddvq_s32( dist ) + lambda * vlc_bits;
     return total_cost < initial_sse ? total_cost : initial_sse;
 }
-#define MOBI_RATECOST_NEON 1
-#else
-#define MOBI_RATECOST_NEON 0
 #endif
 
 int mobi_rescore_4x4( const uint8_t *src, const uint8_t *pred, int stride,
@@ -639,7 +625,7 @@ int mobi_rescore_4x4( const uint8_t *src, const uint8_t *pred, int stride,
         mobi_build_quant_4x4( qp, local.mf, local.iq, &local.fwd_offset, &local.fwd_shift, &local.inv_shift );
         q = &local;
     }
-#if MOBI_RATECOST_NEON
+#if MOBI_NEON
     if( stride == 4 && q != &local )
         return mobi_sad_rate_4x4_neon( src, pred, qp, lambda, is_keyframe, q );
 #endif
@@ -659,7 +645,7 @@ int mobi_rescore_8x8( const uint8_t *src, const uint8_t *pred, int stride,
         mobi_build_quant_8x8( qp, local.mf, local.iq, &local.fwd_offset, &local.fwd_shift, &local.inv_shift );
         q = &local;
     }
-#if MOBI_RATECOST_NEON
+#if MOBI_NEON
     if( stride == 8 && q != &local && q->inv_shift >= 0 )
         return mobi_sad_rate_8x8_neon( src, pred, qp, lambda, is_keyframe, q );
 #endif

@@ -261,25 +261,82 @@ static ALWAYS_INLINE int mb_optimize_chroma_dc( x264_t *h, dctcoef *dct_dc, int 
  * differs from H.264's 6-tap luma / bilinear chroma interpolation.  For inter
  * MBs we must build the prediction with Mobiclip's filter so the residual the
  * encoder computes reconstructs identically in the decoder.  method bits:
- * bit0 = x half-pel, bit1 = y half-pel (matches predict_motion()). xs is the
- * element stride in x (1 for planar luma/chroma). */
-static ALWAYS_INLINE void mobi_interp_block( pixel *dst, int ds, pixel *src, int ss,
-                                             int xs, int w, int hgt, int method )
+ * bit0 = x half-pel, bit1 = y half-pel (matches predict_motion()). */
+#if MOBI_NEON
+/* One row of mobi_interp_block(), 16 / 8 / 4 pixels at a time.  Every term is
+ * a byte shifted right once, so the sums stay within a byte as they do in the
+ * scalar form. */
+static ALWAYS_INLINE uint8x16_t mobi_interp16_neon( const pixel *s, int ss, int method )
 {
+#define H( p ) vshrq_n_u8( vld1q_u8( p ), 1 )
+    switch( method )
+    {
+    default:
+    case 0: return vld1q_u8( s );
+    case 1: return vaddq_u8( H( s ), H( s + 1 ) );
+    case 2: return vaddq_u8( H( s ), H( s + ss ) );
+    case 3: return vaddq_u8( vshrq_n_u8( vaddq_u8( H( s ), H( s + 1 ) ), 1 ),
+                             vshrq_n_u8( vaddq_u8( H( s + ss ), H( s + ss + 1 ) ), 1 ) );
+    }
+#undef H
+}
+#define MOBI_INTERP_D( name, LOAD )\
+static ALWAYS_INLINE uint8x8_t name( const pixel *s, int ss, int method )\
+{\
+    switch( method )\
+    {\
+    default:\
+    case 0: return LOAD( s );\
+    case 1: return vadd_u8( vshr_n_u8( LOAD( s ), 1 ), vshr_n_u8( LOAD( s + 1 ), 1 ) );\
+    case 2: return vadd_u8( vshr_n_u8( LOAD( s ), 1 ), vshr_n_u8( LOAD( s + ss ), 1 ) );\
+    case 3: return vadd_u8( vshr_n_u8( vadd_u8( vshr_n_u8( LOAD( s ), 1 ), vshr_n_u8( LOAD( s + 1 ), 1 ) ), 1 ),\
+                            vshr_n_u8( vadd_u8( vshr_n_u8( LOAD( s + ss ), 1 ), vshr_n_u8( LOAD( s + ss + 1 ), 1 ) ), 1 ) );\
+    }\
+}
+#define MOBI_LOAD4( p ) vreinterpret_u8_u32( vdup_n_u32( M32( p ) ) )
+MOBI_INTERP_D( mobi_interp8_neon, vld1_u8 )
+MOBI_INTERP_D( mobi_interp4_neon, MOBI_LOAD4 )
+#undef MOBI_LOAD4
+#undef MOBI_INTERP_D
+#endif
+
+static ALWAYS_INLINE void mobi_interp_block( pixel *dst, int ds, pixel *src, int ss,
+                                             int w, int hgt, int method )
+{
+#if MOBI_NEON
+    if( w == 16 )
+    {
+        for( int y = 0; y < hgt; y++, dst += ds, src += ss )
+            vst1q_u8( dst, mobi_interp16_neon( src, ss, method ) );
+        return;
+    }
+    if( w == 8 )
+    {
+        for( int y = 0; y < hgt; y++, dst += ds, src += ss )
+            vst1_u8( dst, mobi_interp8_neon( src, ss, method ) );
+        return;
+    }
+    if( w == 4 )
+    {
+        for( int y = 0; y < hgt; y++, dst += ds, src += ss )
+            M32( dst ) = vget_lane_u32( vreinterpret_u32_u8( mobi_interp4_neon( src, ss, method ) ), 0 );
+        return;
+    }
+#endif
     for( int y = 0; y < hgt; y++ )
     {
         for( int x = 0; x < w; x++ )
         {
-            pixel *s = src + x * xs;
+            pixel *s = src + x;
             int v;
             switch( method )
             {
             default:
             case 0: v = s[0]; break;
-            case 1: v = (s[0] >> 1) + (s[xs] >> 1); break;
+            case 1: v = (s[0] >> 1) + (s[1] >> 1); break;
             case 2: v = (s[0] >> 1) + (s[ss] >> 1); break;
-            case 3: v = (((s[0] >> 1) + (s[xs] >> 1)) >> 1) +
-                        (((s[ss] >> 1) + (s[xs + ss] >> 1)) >> 1); break;
+            case 3: v = (((s[0] >> 1) + (s[1] >> 1)) >> 1) +
+                        (((s[ss] >> 1) + (s[1 + ss] >> 1)) >> 1); break;
             }
             dst[x] = v;
         }
@@ -331,6 +388,38 @@ static void mobi_motion_compensate( x264_t *h )
         }
     }
 
+    /* A macroblock whose sixteen 4x4 blocks all carry one MV and reference
+     * (the common case) is interpolated in one piece per plane: every output
+     * pixel depends only on its own source position, so the result is the
+     * same as tiling it from the per-block calls below. */
+    {
+        int i8 = x264_scan8[0];
+        int iref = X264_MAX( h->mb.cache.ref[0][i8], 0 );
+        uint32_t mv = M32( h->mb.cache.mv[0][i8] );
+        int b_uniform = 1;
+        for( int i = 1; i < 16 && b_uniform; i++ )
+        {
+            i8 = x264_scan8[0] + (i&3) + (i>>2)*8;
+            b_uniform = M32( h->mb.cache.mv[0][i8] ) == mv && X264_MAX( h->mb.cache.ref[0][i8], 0 ) == iref;
+        }
+        if( b_uniform )
+        {
+            i8 = x264_scan8[0];
+            int hmvx = h->mb.cache.mv[0][i8][0] >> 1;
+            int hmvy = h->mb.cache.mv[0][i8][1] >> 1;
+            int cmvx = hmvx >> 1;
+            int cmvy = hmvy >> 1;
+            mobi_interp_block( h->mb.pic.p_fdec[0], FDEC_STRIDE,
+                               h->mb.pic.p_fref[0][iref][0] + (hmvy >> 1) * sy + (hmvx >> 1), sy,
+                               16, 16, (hmvx & 1) | ((hmvy & 1) << 1) );
+            for( int ch = 0; ch < 2; ch++ )
+                mobi_interp_block( h->mb.pic.p_fdec[1 + ch], FDEC_STRIDE,
+                                   h->mb.pic.p_fref[0][iref][4 + ch*4] + (cmvy >> 1) * sc + (cmvx >> 1), sc,
+                                   8, 8, (cmvx & 1) | ((cmvy & 1) << 1) );
+            return;
+        }
+    }
+
     /* Luma, per 4x4 block (cache.mv is populated per 4x4). */
     for( int by = 0; by < 16; by += 4 )
         for( int bx = 0; bx < 16; bx += 4 )
@@ -344,7 +433,7 @@ static void mobi_motion_compensate( x264_t *h )
             pixel *ref = h->mb.pic.p_fref[0][iref][0];
             pixel *src = ref + (by + (hmvy >> 1)) * sy + (bx + (hmvx >> 1));
             pixel *dst = h->mb.pic.p_fdec[0] + by * FDEC_STRIDE + bx;
-            mobi_interp_block( dst, FDEC_STRIDE, src, sy, 1, 4, 4, method );
+            mobi_interp_block( dst, FDEC_STRIDE, src, sy, 4, 4, method );
         }
 
     /* Chroma (4:2:0), per 2x2 chroma block = one luma 4x4.  The decoder motion
@@ -375,7 +464,7 @@ static void mobi_motion_compensate( x264_t *h )
             pixel *refc = h->mb.pic.p_fref[0][iref][4 + ch*4];  /* [4]=U, [8]=V */
             pixel *src = refc + srcoff;
             pixel *dst = h->mb.pic.p_fdec[1 + ch] + cqy * FDEC_STRIDE + cqx;
-            mobi_interp_block( dst, FDEC_STRIDE, src, sc, 1, 2, 2, method );
+            mobi_interp_block( dst, FDEC_STRIDE, src, sc, 2, 2, method );
         }
     }
 }
@@ -422,13 +511,7 @@ static ALWAYS_INLINE void mb_encode_chroma_internal( x264_t *h, int b_inter, int
                 /* Decoder-exact chroma dequant: level * (DQ[q%6][pos] << (q/6 - 2)),
                  * into a 32-bit matrix (level*step overflows the int16 dct8x8
                  * buffer), reconstructed with the decoder's inverse transform. */
-                {
-                    int q = mobi_qp( h, i_qp );
-                    int mat[64];
-                    for( int i = 0; i < 64; i++ )
-                        mat[i] = (int)dct8x8[i] * mobi_dq8( q, i );
-                    mobi_add8x8_idct8( p_dst, mat );
-                }
+                mobi_dequant_add8x8( p_dst, dct8x8, &mobi_quant8[mobi_qp( h, i_qp )] );
                 h->mb.cache.non_zero_count[x264_scan8[16 + ch * 16]] = 1;
             }
             else
@@ -976,13 +1059,8 @@ static ALWAYS_INLINE void macroblock_encode_internal( x264_t *h, int plane_count
             pixel *ref = h->mb.pic.p_fref[0][0][0];   /* MB origin, MV=0 */
             pixel *dec = h->mb.pic.p_fdec[0];         /* ME-chosen prediction (x264_mb_mc) */
             int sref = h->mb.pic.i_stride[0];
-            int sad = 0, mc_sad = 0;
-            for( int y = 0; y < 16; y++ )
-                for( int x = 0; x < 16; x++ )
-                {
-                    sad    += abs( src[y*FENC_STRIDE + x] - ref[y*sref + x] );
-                    mc_sad += abs( src[y*FENC_STRIDE + x] - dec[y*FDEC_STRIDE + x] );
-                }
+            int sad    = h->pixf.sad[PIXEL_16x16]( src, FENC_STRIDE, ref, sref );
+            int mc_sad = h->pixf.sad[PIXEL_16x16]( src, FENC_STRIDE, dec, FDEC_STRIDE );
             /* Two independent stabilizations for static content:
              *
              * 1. MV swimming (jitter): on near-static but noisy blocks, sub-pel
