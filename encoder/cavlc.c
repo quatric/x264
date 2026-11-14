@@ -105,7 +105,7 @@ static int mobi_write_pred_mode(x264_t *h, bs_t *s, int bx, int by, int mobi_mod
 {
     int pred = mobi_get_predicted(h, bx, by);
     int mode = mobi_mode;
-    if (getenv("MOBI_PMTRACE")) fprintf(stderr, "PM %d %d 8 %d %d %d\n", bx, by, pred, mode, pred!=mode);
+    if (x264_mobi_env.b_pmtrace) fprintf(stderr, "PM %d %d 8 %d %d %d\n", bx, by, pred, mode, pred!=mode);
     if (pred == mode) {
         bs_write1(s, 1);  /* use predicted mode */
     } else {
@@ -124,7 +124,7 @@ static int mobi_write_pred_mode_4x4(x264_t *h, bs_t *s, int bx, int by, int mobi
     int pred  = mobi_get_predicted(h, bx, by);
     int mode  = mobi_mode;
     int index = (by & 0xC) | ((bx / 4) % 4);
-    if (getenv("MOBI_PMTRACE")) fprintf(stderr, "PM %d %d 4 %d %d %d\n", bx, by, pred, mode, pred!=mode);
+    if (x264_mobi_env.b_pmtrace) fprintf(stderr, "PM %d %d 4 %d %d %d\n", bx, by, pred, mode, pred!=mode);
     if (pred == mode) {
         bs_write1(s, 1);  /* use predicted mode */
     } else {
@@ -628,7 +628,7 @@ static int encode_dct(x264_t* h, dctcoef *l, int length, int table)
 	static int _dctblk = 0;
 	int _dctstart = bs_pos(s);
 	int _dctn = _dctblk;
-	if (getenv("MOBI_DCTDBG")) {
+	if (x264_mobi_env.b_dctdbg) {
 		fprintf(stderr, "DCTIN blk=%d len=%d nnz=%d last=%d:", _dctblk, length, nnz, lastnonzero);
 		for (int i = 0; i < length; i++) if (l[i]) fprintf(stderr, " %d:%d", i, l[i]);
 		fprintf(stderr, "\n");
@@ -646,7 +646,7 @@ static int encode_dct(x264_t* h, dctcoef *l, int length, int table)
 		int val = l[i];
 		if (val < 0)
 			val = -val;
-		if (getenv("MOBI_SIMPLEDCT")) goto explicit;
+		if (x264_mobi_env.b_simpledct) goto explicit;
 		if (val <= 31)
 		{
 			int idx = reftable[val][skip][(i == lastnonzero) ? 1 : 0];
@@ -753,7 +753,7 @@ explicit:
 			break;
 	}
 #if !RDO_SKIP_BS
-	if (getenv("MOBI_DCTDBG"))
+	if (x264_mobi_env.b_dctdbg)
 		fprintf(stderr, "DCTLEN blk=%d bits=%d\n", _dctn, bs_pos(s) - _dctstart);
 #endif
 	return nnz;
@@ -793,7 +793,7 @@ static void encode_i_block(x264_t *h)
 	const int i_mb_type = h->mb.i_type;
 	const int i_mb_pos_start = bs_pos(s);
 #if !RDO_SKIP_BS
-	if (getenv("MOBI_MBDBG"))
+	if (x264_mobi_env.b_mbdbg)
 		fprintf(stderr, "MBSTART %d %d %d\n", h->mb.i_mb_x*16, h->mb.i_mb_y*16, i_mb_pos_start);
 #endif
 
@@ -875,7 +875,7 @@ static void encode_i_block(x264_t *h)
 	bs_write_ue(s, block_mask_to_golomb_table[(!!h->mb.cache.non_zero_count[x264_scan8[16 + cs * 16]] << 5) | (!!h->mb.cache.non_zero_count[x264_scan8[16 + cf * 16]] << 4) | (i_mb_type == I_8x8 ? mask : 0xF)]);
 #if !RDO_SKIP_BS
 	h->stat.frame.i_tex_bits += bs_pos(s) - tmp;
-	if (getenv("MOBI_MBDBG")) {
+	if (x264_mobi_env.b_mbdbg) {
 		int _cb = (!!h->mb.cache.non_zero_count[x264_scan8[16 + cs * 16]] << 5) | (!!h->mb.cache.non_zero_count[x264_scan8[16 + cf * 16]] << 4) | (i_mb_type == I_8x8 ? mask : 0xF);
 		fprintf(stderr, "MB %d %d type=%d t8=%d mask=%d eq=%d di=%d cbits=%d golomb=%d\n",
 			h->mb.i_mb_x*16, h->mb.i_mb_y*16, i_mb_type, h->mb.b_transform_8x8, mask, equalPredict, di, _cb, block_mask_to_golomb_table[_cb]);
@@ -1212,7 +1212,7 @@ static void encode_p_block(x264_t *h)
 	int mpx = mobi_mid_pred(h->mobi_motion_x[mb_col + 1], h->mobi_motion_x[mb_col + 2], h->mobi_motion_x[mb_col + 3]);
 	int mpy = mobi_mid_pred(h->mobi_motion_y[mb_col + 1], h->mobi_motion_y[mb_col + 2], h->mobi_motion_y[mb_col + 3]);
 #if !RDO_SKIP_BS
-	if (getenv("MOBI_ENCDBG"))
+	if (x264_mobi_env.b_encdbg)
 		fprintf(stderr, "[ENC] MB(%d,%d) type=%d part=%d pred=(%d,%d) bitpos=%d\n",
 			h->mb.i_mb_x * 16, h->mb.i_mb_y * 16, h->mb.i_type, h->mb.i_partition, mpx, mpy,
 			bs_pos(&h->out.bs));
@@ -1246,7 +1246,7 @@ static void encode_p_block(x264_t *h)
 #endif
 		BOOL use8x8 = mobi_use_8x8(h);
 #if !RDO_SKIP_BS
-		if (getenv("MOBI_ENCDBG2"))
+		if (x264_mobi_env.b_encdbg2)
 			fprintf(stderr, "[ENC2] MB(%d,%d) type=%d part=%d use8x8=%d sub=(%d,%d,%d,%d)\n",
 				h->mb.i_mb_x * 16, h->mb.i_mb_y * 16, h->mb.i_type, h->mb.i_partition, use8x8,
 				h->mb.i_sub_partition[0], h->mb.i_sub_partition[1],
@@ -1285,7 +1285,7 @@ static void encode_p_block(x264_t *h)
 		bs_write_ue(s, REV_byte_116160[_enc_flags]);
 #if !RDO_SKIP_BS
 		h->stat.frame.i_tex_bits += bs_pos(s) - tmp;
-		if (getenv("MOBI_ENCDBG"))
+		if (x264_mobi_env.b_encdbg)
 			fprintf(stderr, "[ENC2] MB(%d,%d) use8x8=%d flags=0x%02x idx2=%d pos_after_idx2=%d\n",
 				h->mb.i_mb_x*16, h->mb.i_mb_y*16, use8x8, _enc_flags,
 				REV_byte_116160[_enc_flags], bs_pos(s));
@@ -1305,7 +1305,7 @@ static void encode_p_block(x264_t *h)
 					h->mb.cache.non_zero_count[x264_scan8[i8 * 4]] = encode_dct(h, h->dct.luma8x8[i8], 64, h->sh.i_type == SLICE_TYPE_I ? 1 : 0);
 #if !RDO_SKIP_BS
 					h->stat.frame.i_tex_bits += bs_pos(s) - tmp;
-					if (getenv("MOBI_ENCDBG"))
+					if (x264_mobi_env.b_encdbg)
 						fprintf(stderr, "[ENC3] MB(%d,%d) luma8x8[%d] pos_after=%d\n",
 							h->mb.i_mb_x*16, h->mb.i_mb_y*16, i8, bs_pos(s));
 #endif
@@ -1324,7 +1324,7 @@ static void encode_p_block(x264_t *h)
 				bs_write_ue(s, REV_byte_1165C4[masks[i8]]);
 #if !RDO_SKIP_BS
 				h->stat.frame.i_tex_bits += bs_pos(s) - tmp;
-				if (getenv("MOBI_ENCDBG"))
+				if (x264_mobi_env.b_encdbg)
 					fprintf(stderr, "[ENC3] MB(%d,%d) luma4x4grp[%d] sub=0x%x sub_idx=%d pos_after_sub=%d\n",
 						h->mb.i_mb_x*16, h->mb.i_mb_y*16, i8, masks[i8],
 						REV_byte_1165C4[masks[i8]], bs_pos(s));
@@ -1339,14 +1339,14 @@ static void encode_p_block(x264_t *h)
 						h->mb.cache.non_zero_count[x264_scan8[i8 * 4 + i4]] = encode_dct(h, h->dct.luma4x4[i8 * 4 + i4], 16, h->sh.i_type == SLICE_TYPE_I ? 1 : 0);
 #if !RDO_SKIP_BS
 						h->stat.frame.i_tex_bits += bs_pos(s) - tmp;
-						if (getenv("MOBI_ENCDBG"))
+						if (x264_mobi_env.b_encdbg)
 							fprintf(stderr, "[ENC4] MB(%d,%d) luma4x4[%d][%d] pos_after=%d\n",
 								h->mb.i_mb_x*16, h->mb.i_mb_y*16, i8, i4, bs_pos(s));
 #endif
 					}
 				}
 #if !RDO_SKIP_BS
-				if (getenv("MOBI_ENCDBG"))
+				if (x264_mobi_env.b_encdbg)
 					fprintf(stderr, "[ENC3] MB(%d,%d) luma4x4grp[%d] pos_after_grp=%d\n",
 						h->mb.i_mb_x*16, h->mb.i_mb_y*16, i8, bs_pos(s));
 #endif
@@ -1366,7 +1366,7 @@ static void encode_p_block(x264_t *h)
 				h->mb.cache.non_zero_count[x264_scan8[16 + i * 16]] = encode_dct(h, h->dct.luma8x8[4 + 4 * i], 64, h->sh.i_type == SLICE_TYPE_I ? 1 : 0);
 #if !RDO_SKIP_BS
 				h->stat.frame.i_tex_bits += bs_pos(s) - tmp;
-				if (getenv("MOBI_ENCDBG"))
+				if (x264_mobi_env.b_encdbg)
 					fprintf(stderr, "[ENC3] MB(%d,%d) chroma[%d] pos_after=%d\n",
 						h->mb.i_mb_x*16, h->mb.i_mb_y*16, k, bs_pos(s));
 #endif

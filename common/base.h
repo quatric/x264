@@ -272,6 +272,27 @@ X264_API void x264_reduce_fraction( uint32_t *n, uint32_t *d );
 X264_API void x264_reduce_fraction64( uint64_t *n, uint64_t *d );
 
 X264_API void x264_log_default( void *p_unused, int i_level, const char *psz_fmt, va_list arg );
+
+/* Mobiclip debugging and tuning switches.  They come from the environment and
+ * are consulted for every block, so they are read once, when an encoder is
+ * opened, rather than looked up each time. */
+typedef struct
+{
+    int b_pmtrace;   /* MOBI_PMTRACE */
+    int b_dctdbg;    /* MOBI_DCTDBG */
+    int b_simpledct; /* MOBI_SIMPLEDCT */
+    int b_mbdbg;     /* MOBI_MBDBG */
+    int b_encdbg;    /* MOBI_ENCDBG */
+    int b_encdbg2;   /* MOBI_ENCDBG2 */
+    int b_part_log;  /* MOBI_PART_LOG */
+    int b_dbg;       /* MOBI_DBG */
+    int b_qpdbg;     /* MOBI_QPDBG */
+    int b_i8x8;      /* MOBI_I8X8, on unless set to 0 */
+    int i_qyx;       /* MOBI_QYX, never negative */
+    int i_skip;      /* MOBI_SKIP, 512 unless set */
+} x264_mobi_env_t;
+X264_API extern x264_mobi_env_t x264_mobi_env;
+X264_API void x264_mobi_env_init( void );
 X264_API void x264_log_internal( int i_level, const char *psz_fmt, ... );
 
 /* x264_malloc: will do or emulate a memalign

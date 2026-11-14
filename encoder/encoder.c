@@ -1712,6 +1712,8 @@ x264_t *x264_encoder_open( x264_param_t *param, void *api )
 
     CHECKED_MALLOCZERO( h, sizeof(x264_t) );
 
+    x264_mobi_env_init();
+
     /* Create a copy of param */
     memcpy( &h->param, param, sizeof(x264_param_t) );
     h->param.opaque = NULL;
@@ -2990,7 +2992,7 @@ static intptr_t slice_write( x264_t *h )
      * quantizer that produced the coefficients. */
     if( !h->param.i_mobiclip )
         h->sh.i_qp = SPEC_QP( h->sh.i_qp );
-    if( getenv("MOBI_QPDBG") )
+    if( x264_mobi_env.b_qpdbg )
         fprintf(stderr, "SHQP pre_write: sh->i_qp=%d mb_qp=%d mobi=%d\n",
             h->sh.i_qp, h->mb.i_qp, h->param.i_mobiclip);
 	h->sh.i_qp_delta = h->sh.i_qp - h->pps->i_pic_init_qp;

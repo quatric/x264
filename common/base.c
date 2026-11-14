@@ -66,6 +66,35 @@ REDUCE_FRACTION( x264_reduce_fraction  , uint32_t )
 REDUCE_FRACTION( x264_reduce_fraction64, uint64_t )
 
 /****************************************************************************
+ * x264_mobi_env:
+ ****************************************************************************/
+x264_mobi_env_t x264_mobi_env = { .b_i8x8 = 1, .i_skip = 512 };
+
+void x264_mobi_env_init( void )
+{
+    const char *e;
+    x264_mobi_env_t env;
+
+    env.b_pmtrace   = !!getenv( "MOBI_PMTRACE" );
+    env.b_dctdbg    = !!getenv( "MOBI_DCTDBG" );
+    env.b_simpledct = !!getenv( "MOBI_SIMPLEDCT" );
+    env.b_mbdbg     = !!getenv( "MOBI_MBDBG" );
+    env.b_encdbg    = !!getenv( "MOBI_ENCDBG" );
+    env.b_encdbg2   = !!getenv( "MOBI_ENCDBG2" );
+    env.b_part_log  = !!getenv( "MOBI_PART_LOG" );
+    env.b_dbg       = !!getenv( "MOBI_DBG" );
+    env.b_qpdbg     = !!getenv( "MOBI_QPDBG" );
+    e = getenv( "MOBI_I8X8" );
+    env.b_i8x8      = !e || atoi( e );
+    e = getenv( "MOBI_QYX" );
+    env.i_qyx       = e ? X264_MAX( atoi( e ), 0 ) : 0;
+    e = getenv( "MOBI_SKIP" );
+    env.i_skip      = e ? X264_MAX( atoi( e ), 0 ) : 512;
+    /* every opener computes the same values, so concurrent opens are harmless */
+    x264_mobi_env = env;
+}
+
+/****************************************************************************
  * x264_log:
  ****************************************************************************/
 void x264_log_default( void *p_unused, int i_level, const char *psz_fmt, va_list arg )

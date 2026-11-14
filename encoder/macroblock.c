@@ -971,8 +971,7 @@ static ALWAYS_INLINE void macroblock_encode_internal( x264_t *h, int plane_count
         int b_mobi_edge_row = ( h->mb.i_mb_y == 0 || h->mb.i_mb_y == h->mb.i_mb_height - 1 );
         if( h->param.i_mobiclip && !h->mb.b_lossless && h->mb.pic.i_fref[0] > 0 && !b_mobi_edge_row )
         {
-            static int thr = -1;
-            if( thr < 0 ) { const char *e = getenv("MOBI_SKIP"); thr = e ? atoi(e) : 512; if( thr < 0 ) thr = 0; }
+            const int thr = x264_mobi_env.i_skip;
             pixel *src = h->mb.pic.p_fenc[0];
             pixel *ref = h->mb.pic.p_fref[0][0][0];   /* MB origin, MV=0 */
             pixel *dec = h->mb.pic.p_fdec[0];         /* ME-chosen prediction (x264_mb_mc) */
@@ -1332,7 +1331,7 @@ void x264_macroblock_encode( x264_t *h )
     else
         macroblock_encode_internal( h, 1, 0 );
 
-    if( getenv("MOBI_DBG") && h->mb.i_mb_x == 4 && h->mb.i_mb_y == 4 )
+    if( x264_mobi_env.b_dbg && h->mb.i_mb_x == 4 && h->mb.i_mb_y == 4 )
     {
         long se = 0, sd = 0;
         for( int y = 0; y < 16; y++ )

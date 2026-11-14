@@ -92,7 +92,8 @@ static const uint8_t mobi_dequant8_scale[6][6] = {
 static ALWAYS_INLINE int mobi_qp( x264_t *h, int i_qp )
 {
     int extra = h->param.i_mobi_qyx;
-    if( extra < 0 ) { const char *e = getenv("MOBI_QYX"); extra = e ? atoi(e) : 0; if( extra < 0 ) extra = 0; }
+    if( extra < 0 )
+        extra = x264_mobi_env.i_qyx;
     return x264_clip3( i_qp + 6 * extra, 12, 63 );
 }
 
@@ -431,8 +432,7 @@ do\
  * bit depths. */
 static ALWAYS_INLINE int mobi_i8x8_enabled( void )
 {
-    const char *e = getenv( "MOBI_I8X8" );
-    return !e || atoi( e );
+    return x264_mobi_env.b_i8x8;
 }
 
 #if !HIGH_BIT_DEPTH

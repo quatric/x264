@@ -3440,7 +3440,7 @@ skip_analysis:
                     }
                     if( c < best_cost ) { best_cost = c; best_type = P_L0; best_part = D_8x8; }
                 }
-                if( getenv( "MOBI_PART_LOG" ) && best_part != i_partition )
+                if( x264_mobi_env.b_part_log && best_part != i_partition )
                     fprintf( stderr, "MOBI_PART flip x264=%d retail=%d\n", i_partition, best_part );
                 i_type = best_type;
                 i_partition = best_part;
