@@ -1,6 +1,8 @@
 /*****************************************************************************
  * mobi_neon.h: NEON building blocks shared by the Mobiclip kernels
  *****************************************************************************
+ * Copyright (C) 2026 quatric <quatricsoftware@gmail.com>
+ *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation; either version 2 of the License, or

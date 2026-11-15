@@ -1,6 +1,8 @@
 /*****************************************************************************
  * mobi_ratecost.h: retail Mobiclip's SAD-rate RD-cost primitives
  *****************************************************************************
+ * Copyright (C) 2026 quatric <quatricsoftware@gmail.com>
+ *
  * Ported verbatim from Helwettpackardenterprise's MODS_Encoder_v43_2
  * (mods_encoder.c:145-421 and 6694-6984), a translation of the retail
  * Mobiclip VfW encoder verified against the original DLL under Unicorn.

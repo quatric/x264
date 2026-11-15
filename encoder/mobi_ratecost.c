@@ -1,6 +1,8 @@
 /*****************************************************************************
  * mobi_ratecost.c: retail Mobiclip's SAD-rate RD-cost primitives
  *****************************************************************************
+ * Copyright (C) 2026 quatric <quatricsoftware@gmail.com>
+ *
  * Ported verbatim from Helwettpackardenterprise's MODS_Encoder_v43_2
  * (mods_encoder.c:145-421 and 6694-6984). See mobi_ratecost.h for the
  * verification summary and exact quant-parameter formulas.
