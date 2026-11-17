@@ -158,6 +158,13 @@ typedef struct x264_frame
     x264_pthread_cond_t  cv;
     int     i_slice_count; /* Atomically written to/read from with slice threads */
 
+    /* Mobiclip: the quantizer this picture's header carries.  The next
+     * picture's header codes its own as a difference from it, so with frame
+     * threads it has to come from the picture rather than from whichever
+     * thread context last wrote a header.  Written before the picture
+     * reports its first completed line. */
+    int     i_mobi_hqp;
+
     /* periodic intra refresh */
     float   f_pir_position;
     int     i_pir_start_col;

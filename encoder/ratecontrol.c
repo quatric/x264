@@ -2838,6 +2838,7 @@ void x264_thread_sync_ratecontrol( x264_t *cur, x264_t *prev, x264_t *next )
         COPY(bframes);
         COPY(prev_zone);
         COPY(mbtree.qpbuf_pos);
+        COPY(mobi_cq);
         /* these vars can be updated by x264_ratecontrol_init_reconfigurable */
         COPY(bitrate);
         COPY(buffer_size);

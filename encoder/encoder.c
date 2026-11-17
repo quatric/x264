@@ -245,14 +245,17 @@ static void slice_header_write( x264_t *h, bs_t *s, x264_slice_header_t *sh, int
             extern void x264_mobiclip_reset_pre(x264_t *h);
             x264_mobiclip_reset_pre(h);
             bs_write1(s, 0);
-            //qp delta
+            //qp delta, against the picture this one predicts from: with one
+            //reference and no B-frames that is the picture coded just before.
+            //Its header is written before it reports a finished line, so on a
+            //frame thread wait for one.
+            x264_frame_t *prev = h->fref[0][0]->orig;
             int cur_hqp = mobi_qp(h, sh->i_qp);
-            bs_write_se(s, cur_hqp - h->i_mobi_old_qp);
+            if( h->i_thread_frames > 1 )
+                x264_frame_cond_wait( prev, 0 );
+            bs_write_se(s, cur_hqp - prev->i_mobi_hqp);
         }
-        {
-            int hqp = mobi_qp(h, sh->i_qp);
-            h->i_mobi_old_qp = hqp;
-        }
+        h->fdec->i_mobi_hqp = mobi_qp(h, sh->i_qp);
         return;
     }
 
@@ -486,21 +489,19 @@ static int validate_parameters( x264_t *h, int b_open )
         return -1;
     }
 
-    /* This x264 build emits a Mobiclip bitstream whose inter-frame state is
-     * strictly sequential: the P-frame quantizer is delta-coded against the
-     * previous frame (h->i_mobi_old_qp), motion vectors predict from the prior
-     * frame, and the decoder has no B-frame path.  x264 frame-threading encodes
-     * frames out of order in independent thread contexts, which desyncs the QP
-     * delta (the decoder's accumulated quantizer then drifts out of [12,161] and
-     * it bails with "Invalid data"), and B-frames are simply undecodable here.
-     * Force single-threaded, B-frame-free encoding so the stream stays valid.
-     * Also pin a single reference frame: the encoder's multi-ref motion-index
-     * mapping desyncs the decoder's sidx = current_pic - index selection (a P
-     * frame ends up referencing an unwritten picture buffer -> FAIL at the
-     * !s->pic[sidx]->data[i] guard).  ref=1 always maps to the previous frame. */
+    /* This x264 build emits a Mobiclip bitstream with no B-frame path, and a
+     * P picture always predicts from the one coded just before it: the
+     * decoder's sidx = current_pic - index selection only works with a single
+     * reference, so pin ref=1 and drop B-frames.
+     *
+     * Frame threads are fine.  The motion vector predictor and the intra mode
+     * context are per picture and live in each thread's own context, and the
+     * one piece of state carried from picture to picture -- the header's
+     * quantizer, coded as a difference from the previous picture's -- is read
+     * from that picture (x264_frame_t.i_mobi_hqp) once it has been written,
+     * not from whichever thread context wrote a header last. */
     if( h->param.i_mobiclip )
     {
-        h->param.i_threads         = 1;
         h->param.i_bframe          = 0;
         h->param.i_frame_reference = 1;
         /* Mobiclip has no slice address: each frame must be encoded in full. */
@@ -1533,6 +1534,13 @@ static int validate_parameters( x264_t *h, int b_open )
         }
         r = X264_MAX( r, h->param.analyse.i_me_range );
         r = X264_MIN( r, h->param.analyse.i_mv_range );
+        /* Mobiclip's vectors do not always stay inside mv_max_spel: its
+         * edge margin (mobi_border in analyse.c) is stricter than what the
+         * search hands back near the bottom and top rows.  They do stay
+         * within mv_range, so wait for that much of the reference and every
+         * vector the picture can carry reads rows that are already done. */
+        if( h->param.i_mobiclip )
+            r = h->param.analyse.i_mv_range;
         // round up to use the whole mb row
         r2 = (r & ~15) + ((-X264_THREAD_HEIGHT) & 15);
         if( r2 < r )
