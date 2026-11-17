@@ -504,6 +504,13 @@ static int validate_parameters( x264_t *h, int b_open )
     {
         h->param.i_bframe          = 0;
         h->param.i_frame_reference = 1;
+        /* Nor has it weighted prediction: the header carries no weights and
+         * the reconstruction reads the plain reference, so weightp only made
+         * the motion search match pixels the decoder never sees (to no
+         * measurable gain), and on frame threads its lazily weighted planes
+         * made the output differ from run to run.  The lookahead's own
+         * weighting (X264_WEIGHTP_FAKE) is unaffected. */
+        h->param.analyse.i_weighted_pred = X264_WEIGHTP_NONE;
         /* Mobiclip has no slice address: each frame must be encoded in full. */
         if( h->param.i_slice_count > 1 || h->param.i_slice_max_size > 0 ||
             h->param.i_slice_max_mbs > 0 )

@@ -749,15 +749,15 @@ static int encode_dct(x264_t* h, dctcoef *l, int length, int table)
 	}
 #endif
 #if !RDO_SKIP_BS
-	static int _dctblk = 0;
+	static int _dctblk = 0; /* MOBI_DCTDBG only; counted only then, so frame threads don't race on it */
 	int _dctstart = bs_pos(s);
 	int _dctn = _dctblk;
 	if (x264_mobi_env.b_dctdbg) {
 		fprintf(stderr, "DCTIN blk=%d len=%d nnz=%d last=%d:", _dctblk, length, nnz, lastnonzero);
 		for (int i = 0; i < length; i++) if (l[i]) fprintf(stderr, " %d:%d", i, l[i]);
 		fprintf(stderr, "\n");
+		_dctblk++;
 	}
-	_dctblk++;
 #endif
 	/* A block with nothing in it, or only its first coefficient, is written
 	 * as that one coefficient; otherwise every non-zero coefficient is,
