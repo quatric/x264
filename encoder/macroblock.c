@@ -507,6 +507,66 @@ static void mobi_motion_compensate( x264_t *h )
 }
 #endif
 
+#if !HIGH_BIT_DEPTH
+static void mobi_mc_luma_block( x264_t *h, int x, int y, int width, int height )
+{
+    int i8    = x264_scan8[0] + x + 8*y;
+    int i_ref = h->mb.cache.ref[0][i8];
+    int mvx   = x264_clip3( h->mb.cache.mv[0][i8][0], h->mb.mv_min[0], h->mb.mv_max[0] ) + 4*4*x;
+    int mvy   = x264_clip3( h->mb.cache.mv[0][i8][1], h->mb.mv_min[1], h->mb.mv_max[1] ) + 4*4*y;
+    h->mc.mc_luma( &h->mb.pic.p_fdec[0][4*y*FDEC_STRIDE+4*x], FDEC_STRIDE,
+                   &h->mb.pic.p_fref[0][i_ref][0], h->mb.pic.i_stride[0],
+                   mvx, mvy, 4*width, 4*height, &h->sh.weight[i_ref][0] );
+}
+
+/* The luma half of x264_mb_mc() for a P macroblock, partition for partition,
+ * for the Mobiclip static-block check, which looks at nothing else:
+ * mobi_motion_compensate() then replaces the whole prediction, so x264's
+ * chroma prediction would be thrown away. */
+static void mobi_mc_luma( x264_t *h )
+{
+    if( h->mb.i_partition == D_8x8 )
+    {
+        for( int i8 = 0; i8 < 4; i8++ )
+        {
+            int x = 2*(i8&1), y = 2*(i8>>1);
+            switch( h->mb.i_sub_partition[i8] )
+            {
+                case D_L0_8x8:
+                    mobi_mc_luma_block( h, x, y, 2, 2 );
+                    break;
+                case D_L0_8x4:
+                    mobi_mc_luma_block( h, x, y+0, 2, 1 );
+                    mobi_mc_luma_block( h, x, y+1, 2, 1 );
+                    break;
+                case D_L0_4x8:
+                    mobi_mc_luma_block( h, x+0, y, 1, 2 );
+                    mobi_mc_luma_block( h, x+1, y, 1, 2 );
+                    break;
+                case D_L0_4x4:
+                    mobi_mc_luma_block( h, x+0, y+0, 1, 1 );
+                    mobi_mc_luma_block( h, x+1, y+0, 1, 1 );
+                    mobi_mc_luma_block( h, x+0, y+1, 1, 1 );
+                    mobi_mc_luma_block( h, x+1, y+1, 1, 1 );
+                    break;
+            }
+        }
+    }
+    else if( h->mb.i_partition == D_16x16 )
+        mobi_mc_luma_block( h, 0, 0, 4, 4 );
+    else if( h->mb.i_partition == D_16x8 )
+    {
+        mobi_mc_luma_block( h, 0, 0, 4, 2 );
+        mobi_mc_luma_block( h, 0, 2, 4, 2 );
+    }
+    else if( h->mb.i_partition == D_8x16 )
+    {
+        mobi_mc_luma_block( h, 0, 0, 2, 4 );
+        mobi_mc_luma_block( h, 2, 0, 2, 4 );
+    }
+}
+#endif
+
 static ALWAYS_INLINE void mb_encode_chroma_internal( x264_t *h, int b_inter, int i_qp, int chroma422 )
 {
     int nz, nz_dc;
@@ -1069,9 +1129,31 @@ static ALWAYS_INLINE void macroblock_encode_internal( x264_t *h, int plane_count
     {
         int i_decimate_mb = 0;
 
+#if !HIGH_BIT_DEPTH
+        /* Never freeze/stabilize the top or bottom macroblock row.  Motion
+         * compensation there reads the frame's edge-extended border, whose
+         * value isn't reliable enough to copy across frames; freezing it (skip)
+         * locks in a wrong prediction that then oscillates frame-to-frame,
+         * showing up as jittery horizontal lines along the top/bottom edges. */
+        int b_mobi_edge_row = ( h->mb.i_mb_y == 0 || h->mb.i_mb_y == h->mb.i_mb_height - 1 );
+        int b_mobi_check = h->param.i_mobiclip && !h->mb.b_lossless && h->mb.pic.i_fref[0] > 0 && !b_mobi_edge_row;
+#endif
+
         /* Don't repeat motion compensation if it was already done in non-RD transform analysis */
         if( !h->mb.b_skip_mc )
-            x264_mb_mc( h );
+        {
+#if !HIGH_BIT_DEPTH
+            /* Mobiclip's own interpolation replaces the prediction below, so
+             * all it needs from x264's is the luma for the static-block check. */
+            if( h->param.i_mobiclip && h->sh.i_type == SLICE_TYPE_P )
+            {
+                if( b_mobi_check )
+                    mobi_mc_luma( h );
+            }
+            else
+#endif
+                x264_mb_mc( h );
+        }
 
 #if !HIGH_BIT_DEPTH
         /* Mobiclip P_SKIP: if this MB is essentially identical to the SAME
@@ -1083,13 +1165,7 @@ static ALWAYS_INLINE void macroblock_encode_internal( x264_t *h, int plane_count
          * the GOP.  Threshold is the per-MB luma SAD vs the zero-MV reference
          * (default ~2/pixel, tunable via MOBI_SKIP). */
         int b_mobi_skip = 0;
-        /* Never freeze/stabilize the top or bottom macroblock row.  Motion
-         * compensation there reads the frame's edge-extended border, whose
-         * value isn't reliable enough to copy across frames; freezing it (skip)
-         * locks in a wrong prediction that then oscillates frame-to-frame,
-         * showing up as jittery horizontal lines along the top/bottom edges. */
-        int b_mobi_edge_row = ( h->mb.i_mb_y == 0 || h->mb.i_mb_y == h->mb.i_mb_height - 1 );
-        if( h->param.i_mobiclip && !h->mb.b_lossless && h->mb.pic.i_fref[0] > 0 && !b_mobi_edge_row )
+        if( b_mobi_check )
         {
             const int thr = x264_mobi_env.i_skip;
             pixel *src = h->mb.pic.p_fenc[0];
