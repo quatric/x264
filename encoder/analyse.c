@@ -362,9 +362,13 @@ static void mb_analyse_init( x264_t *h, x264_mb_analysis_t *a, int qp )
          * up to 24 pixels into the padded border.  The Mobiclip decoder reads
          * raw reference-frame data with NO border padding and rejects any MV
          * whose block falls outside [0,width]x[0,height] (predict_motion bounds
-         * check), so restrict the range to keep the whole MB inside the frame
-         * (a small negative margin leaves room for the half-pel +1 sample). */
-        int mobi_border = h->param.i_mobiclip ? -20 : 24;
+         * check), so restrict the range to keep the whole MB inside the frame.
+         * No margin beyond that: the margin used to be -20, which kept every
+         * edge macroblock's search at least 20 pixels inward (so at the top
+         * row its minimum could pass its frame-thread maximum), and the
+         * half-pel sample past an edge vector is already clamped away by
+         * mobi_motion_compensate(). */
+        int mobi_border = h->param.i_mobiclip ? 0 : 24;
         h->mb.mv_min[0] = 4*( -16*h->mb.i_mb_x - mobi_border );
         h->mb.mv_max[0] = 4*( 16*( h->mb.i_mb_width - h->mb.i_mb_x - 1 ) + mobi_border );
         h->mb.mv_min_spel[0] = X264_MAX( h->mb.mv_min[0], -i_fmv_range );
@@ -420,8 +424,8 @@ static void mb_analyse_init( x264_t *h, x264_mb_analysis_t *a, int qp )
             }
             else
             {
-                h->mb.mv_min[1] = 4*( -16*mb_y - (h->param.i_mobiclip ? -20 : 24) );
-                h->mb.mv_max[1] = 4*( 16*( h->mb.i_mb_height - mb_y - 1 ) + (h->param.i_mobiclip ? -20 : 24) );
+                h->mb.mv_min[1] = 4*( -16*mb_y - mobi_border );
+                h->mb.mv_max[1] = 4*( 16*( h->mb.i_mb_height - mb_y - 1 ) + mobi_border );
                 h->mb.mv_min_spel[1] = X264_MAX( h->mb.mv_min[1], -i_fmv_range );
                 h->mb.mv_max_spel[1] = X264_MIN3( h->mb.mv_max[1], i_fmv_range-1, 4*thread_mvy_range );
                 h->mb.mv_limit_fpel[0][1] = (h->mb.mv_min_spel[1]>>2) + i_fpel_border;
