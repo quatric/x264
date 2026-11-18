@@ -3512,7 +3512,15 @@ skip_analysis:
                         int ox = (i8&1)*8, oy = (i8>>1)*8;
                         c += mobi_retail_cost( h, &analysis, &analysis.l0.me8x8[i8], fenc + oy*FENC_STRIDE + ox, MOBI_MV_OF( &analysis.l0.me8x8[i8] ), 8, 8, qp, lambda );
                     }
-                    if( c < best_cost ) { best_cost = c; best_type = P_L0; best_part = D_8x8; }
+                    /* Four 8x8 vectors make a P_8x8 macroblock, not a P_L0
+                     * one: analyse_update_cache() only writes the 8x8
+                     * vectors for P_8x8, and the partition writer only
+                     * splits a P_8x8 macroblock into four.  As P_L0 the
+                     * macroblock kept whatever vectors were left in the
+                     * cache and went out as one 16x16 vector, while the
+                     * encoder reconstructed it from all of them, so without
+                     * RD mode decision (subme < 6) the decoder drifted. */
+                    if( c < best_cost ) { best_cost = c; best_type = P_8x8; best_part = D_8x8; }
                 }
                 if( x264_mobi_env.b_part_log && best_part != i_partition )
                     fprintf( stderr, "MOBI_PART flip x264=%d retail=%d\n", i_partition, best_part );
