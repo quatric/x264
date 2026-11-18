@@ -515,6 +515,11 @@ static int validate_parameters( x264_t *h, int b_open )
         if( h->param.i_slice_count > 1 || h->param.i_slice_max_size > 0 ||
             h->param.i_slice_max_mbs > 0 )
             x264_log( h, X264_LOG_WARNING, "Mobiclip does not support multiple slices; disabling slice limits\n" );
+        /* Sliced threads are how a caller asks for no frame delay (tune
+         * zerolatency).  Without slices they cannot split a picture, and
+         * frame threads would bring back the delay, so encode on one thread. */
+        if( h->param.b_sliced_threads )
+            h->param.i_threads = 1;
         h->param.b_sliced_threads  = 0;
         h->param.i_slice_count     = 1;
         h->param.i_slice_count_max = 1;
