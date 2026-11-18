@@ -323,8 +323,14 @@ static void mb_analyse_init( x264_t *h, x264_mb_analysis_t *a, int qp )
      * of the intra search can leave the per-4x4 prediction modes unanalysed
      * (garbage), which then get written to the bitstream by the forced-I_4x4
      * encode and desync the decoder.  Disable it so every 4x4 block always has
-     * a valid analysed mode.  (Dropped during the upstream-x264 rebase.) */
-    if( h->param.i_mobiclip )
+     * a valid analysed mode.  (Dropped during the upstream-x264 rebase.)
+     *
+     * That only matters where I_4x4 is forced, i.e. in an I slice.  In a P
+     * slice an intra macroblock has to win on cost, and a search cut short
+     * scores COST_MAX, so it never can with unanalysed modes; keep early
+     * termination there; it skips the intra RD and most of the intra search
+     * for macroblocks that inter prediction already codes well. */
+    if( h->param.i_mobiclip && h->sh.i_type == SLICE_TYPE_I )
         a->b_early_terminate = 0;
 
     mb_analyse_init_qp( h, a, qp );
@@ -1021,14 +1027,19 @@ static void mb_analyse_intra( x264_t *h, x264_mb_analysis_t *a, int i_satd_inter
                 i_best = h->pixf.mbcmp[PIXEL_4x4]( p_src_by, FENC_STRIDE, p_dst_by, FDEC_STRIDE );
                 i_cost += i_best + 3 * lambda;
                 h->mb.cache.intra4x4_pred_mode[x264_scan8[idx]] = retail_best_mode;
-                /* Mobiclip always forces I_4x4 regardless of i_cost (see
-                 * x264_macroblock_analyse); never early-terminate this scan
-                 * on the i_satd_thresh check below, or a->i_satd_i4x4 falls
-                 * back to COST_MAX for the rest of the macroblock, which the
-                 * P-slice compare would then wrongly read as "intra is
-                 * infinitely expensive". `idx==15` still needs to fall
-                 * through to the loop's normal post-scan bookkeeping below,
-                 * exactly like the non-mobiclip paths' own `break` does. */
+                /* An I slice forces I_4x4 regardless of i_cost (see
+                 * x264_macroblock_analyse), so there the scan always runs to
+                 * the end (early termination is off, i_satd_thresh is
+                 * COST_MAX).  In a P slice, stop once intra can no longer
+                 * beat inter: i_satd_thresh is then the inter cost (the
+                 * 16x16 and 8x8 scores are not searched there), the
+                 * macroblock scores COST_MAX below and is never coded as
+                 * intra, so its unsearched modes are never used.  `idx==15`
+                 * still needs to fall through to the loop's normal post-scan
+                 * bookkeeping below, exactly like the non-mobiclip paths'
+                 * own `break` does. */
+                if( b_mobi_p && i_cost > i_satd_thresh )
+                    break;
                 if( idx == 15 )
                     break;
                 continue;
