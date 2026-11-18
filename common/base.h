@@ -204,6 +204,19 @@ static const uint8_t x264_scan8[16*3 + 3] =
 /****************************************************************************
  * Inline functions
  ****************************************************************************/
+/* isfinite() for code built with -ffast-math, which lets the compiler assume
+ * NaN and infinity never occur and fold isfinite(), NaN-false comparisons
+ * and even an exponent-bit test of the value to constants.  Pass the value
+ * through a volatile so the test sees whatever is actually there. */
+static ALWAYS_INLINE int x264_isfinite( double v )
+{
+    volatile double opaque = v;
+    double copy = opaque;
+    uint64_t bits;
+    memcpy( &bits, &copy, sizeof(bits) );
+    return ((bits >> 52) & 0x7ff) != 0x7ff;
+}
+
 static ALWAYS_INLINE int x264_clip3( int v, int i_min, int i_max )
 {
     return ( (v < i_min) ? i_min : (v > i_max) ? i_max : v );

@@ -921,7 +921,7 @@ static double atof_internal( const char *str, int *b_error )
     double v = strtod( str, &end );
     /* Numeric parameters are stored as floats. Reject values that would
      * become non-finite on assignment, as well as explicit NaN/infinity. */
-    if( !(v >= -FLT_MAX && v <= FLT_MAX) || end == str || *end != '\0' )
+    if( !x264_isfinite( v ) || !(v >= -FLT_MAX && v <= FLT_MAX) || end == str || *end != '\0' )
     {
         *b_error = 1;
         return 0;
