@@ -347,6 +347,42 @@ static ALWAYS_INLINE void mobi_interp_block( pixel *dst, int ds, pixel *src, int
 }
 
 /* Overwrite p_fdec[0..2] for the current inter MB with Mobiclip's MC. */
+/* Mobiclip codes each partition's MV as a signed Exp-Golomb delta from one
+ * per-macroblock predictor (cavlc.c encode_p_block).  Retail streams never
+ * code a delta beyond +-127 half-pels, and the Wii's MobiClip player hangs on
+ * some larger ones (17-bit codes), freezing playback for good.  The search
+ * itself knows nothing of this predictor, so clamp the chosen vectors here,
+ * before the prediction is built, keeping them inside the macroblock's
+ * search bounds so they still point inside the frame. */
+#define MOBI_MAX_MVD 127
+static void mobi_clamp_mvd( x264_t *h )
+{
+    int c = h->mb.i_mb_x;
+    int pred[2] = {
+        x264_median( h->mobi_motion_x[c+1], h->mobi_motion_x[c+2], h->mobi_motion_x[c+3] ),
+        x264_median( h->mobi_motion_y[c+1], h->mobi_motion_y[c+2], h->mobi_motion_y[c+3] ),
+    };
+
+    for( int i = 0; i < 16; i++ )
+    {
+        int16_t *mv = h->mb.cache.mv[0][x264_scan8[0] + (i&3) + (i>>2)*8];
+        for( int k = 0; k < 2; k++ )
+        {
+            int d = (mv[k] >> 1) - pred[k];
+            if( d >= -MOBI_MAX_MVD && d <= MOBI_MAX_MVD )
+                continue;
+            int lo = 2 * (pred[k] - MOBI_MAX_MVD);
+            int hi = 2 * (pred[k] + MOBI_MAX_MVD);
+            int v = x264_clip3( mv[k], lo, hi );
+            /* The window always overlaps the bounds in practice (the
+             * predictor comes from neighbouring vectors); if it ever did
+             * not, staying inside the frame matters more. */
+            v = x264_clip3( v, h->mb.mv_min[k], h->mb.mv_max[k] );
+            mv[k] = v & ~1;
+        }
+    }
+}
+
 static void mobi_motion_compensate( x264_t *h )
 {
     int sy = h->mb.pic.i_stride[0];
@@ -1111,6 +1147,7 @@ static ALWAYS_INLINE void macroblock_encode_internal( x264_t *h, int plane_count
              * then reconstructs different motion than the encoder did. */
             if( h->mb.i_type == P_8x8 )
                 h->mb.i_partition = D_8x8;
+            mobi_clamp_mvd( h );
             mobi_motion_compensate( h );
         }
 #endif
