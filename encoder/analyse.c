@@ -748,6 +748,21 @@ static void mb_analyse_intra( x264_t *h, x264_mb_analysis_t *a, int i_satd_inter
     int b_mobi_p = h->param.i_mobiclip && h->sh.i_type != SLICE_TYPE_I;
     if( b_mobi_p )
         flags &= ~X264_ANALYSE_I8x8;
+    /* The Mobiclip 4x4 search scores every mode of every block with the
+     * retail rate estimate, so in a P slice first try the cheap 16x16
+     * predictors, as x264's own early termination does with its 16x16 and
+     * 8x8 scores, and skip the 4x4 search when none of them beats inter
+     * prediction.  That rarely costs an intra macroblock worth having: on
+     * test clips it was BD-rate neutral to slightly better.  The 16x16
+     * predictors need both the top and the left neighbour. */
+    if( b_mobi_p && a->b_early_terminate && !h->mb.b_lossless &&
+        (h->mb.i_neighbour_intra & (MB_TOP|MB_LEFT)) == (MB_TOP|MB_LEFT) )
+    {
+        ALIGNED_ARRAY_16( int32_t, satd16,[4] );
+        h->pixf.intra_mbcmp_x3_16x16( h->mb.pic.p_fenc[0], h->mb.pic.p_fdec[0], satd16 );
+        if( X264_MIN3( satd16[0], satd16[1], satd16[2] ) > i_satd_inter )
+            return;
+    }
     pixel *p_src = h->mb.pic.p_fenc[0];
     pixel *p_dst = h->mb.pic.p_fdec[0];
     static const int8_t intra_analysis_shortcut[2][2][2][5] =
