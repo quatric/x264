@@ -730,7 +730,14 @@ static void mb_analyse_intra_chroma( x264_t *h, x264_mb_analysis_t *a )
 /* FIXME: should we do any sort of merged chroma analysis with 4:4:4? */
 static void mb_analyse_intra( x264_t *h, x264_mb_analysis_t *a, int i_satd_inter )
 {
-    const unsigned int flags = h->sh.i_type == SLICE_TYPE_I ? h->param.analyse.intra : h->param.analyse.inter;
+    unsigned int flags = h->sh.i_type == SLICE_TYPE_I ? h->param.analyse.intra : h->param.analyse.inter;
+    /* Mobiclip codes an intra macroblock in a P slice as I_4x4 only (see the
+     * intra type decision in x264_macroblock_analyse), and with early
+     * termination off nothing else reads the 16x16 and 8x8 scores, so don't
+     * search them there. */
+    int b_mobi_p = h->param.i_mobiclip && h->sh.i_type != SLICE_TYPE_I;
+    if( b_mobi_p )
+        flags &= ~X264_ANALYSE_I8x8;
     pixel *p_src = h->mb.pic.p_fenc[0];
     pixel *p_dst = h->mb.pic.p_fdec[0];
     static const int8_t intra_analysis_shortcut[2][2][2][5] =
@@ -750,7 +757,7 @@ static void mb_analyse_intra( x264_t *h, x264_mb_analysis_t *a, int i_satd_inter
 
     /*---------------- Try all mode and calculate their score ---------------*/
     /* Disabled i16x16 for AVC-Intra compat */
-    if( !h->param.i_avcintra_class )
+    if( !h->param.i_avcintra_class && !b_mobi_p )
     {
         const int8_t *predict_mode = predict_16x16_mode_available( h->mb.i_neighbour_intra );
 
@@ -1120,7 +1127,14 @@ static void intra_rd( x264_t *h, x264_mb_analysis_t *a, int i_satd_thresh )
     if( !a->b_early_terminate )
         i_satd_thresh = COST_MAX;
 
-    if( a->i_satd_i16x16 < i_satd_thresh )
+    /* Mobiclip codes an intra macroblock as I_4x4, or as I_8x8 in an I slice
+     * (see the intra type decision in x264_macroblock_analyse), and never as
+     * I_16x16.  The RD cost of a type it cannot pick is never read, so don't
+     * work it out: that was a fifth of the macroblock analysis. */
+    int b_rd_i16x16 = !h->param.i_mobiclip;
+    int b_rd_i8x8 = !h->param.i_mobiclip || (h->sh.i_type == SLICE_TYPE_I && mobi_i8x8_enabled());
+
+    if( a->i_satd_i16x16 < i_satd_thresh && b_rd_i16x16 )
     {
         h->mb.i_type = I_16x16;
         analyse_update_cache( h, a );
@@ -1138,7 +1152,7 @@ static void intra_rd( x264_t *h, x264_mb_analysis_t *a, int i_satd_thresh )
     else
         a->i_satd_i4x4 = COST_MAX;
 
-    if( a->i_satd_i8x8 < i_satd_thresh )
+    if( a->i_satd_i8x8 < i_satd_thresh && b_rd_i8x8 )
     {
         h->mb.i_type = I_8x8;
         analyse_update_cache( h, a );
