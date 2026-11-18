@@ -1130,6 +1130,16 @@ static ALWAYS_INLINE void macroblock_encode_internal( x264_t *h, int plane_count
         int i_decimate_mb = 0;
 
 #if !HIGH_BIT_DEPTH
+        /* Analysis can leave i_partition at D_16x16 on a P_8x8 macroblock.
+         * The static-block check's prediction (mobi_mc_luma) follows
+         * i_partition, so a stale value made it predict the whole macroblock
+         * from the first 8x8's vector; and mobi_encode_p_partition() keys the
+         * 16x8 -> 8x8 split on it, so it wrote a two-16x8 partition tree while
+         * the MV field really holds four 8x8 MVs -- the decoder then
+         * reconstructs different motion than the encoder did. */
+        if( h->param.i_mobiclip && h->mb.i_type == P_8x8 )
+            h->mb.i_partition = D_8x8;
+
         /* Never freeze/stabilize the top or bottom macroblock row.  Motion
          * compensation there reads the frame's edge-extended border, whose
          * value isn't reliable enough to copy across frames; freezing it (skip)
@@ -1216,13 +1226,6 @@ static ALWAYS_INLINE void macroblock_encode_internal( x264_t *h, int plane_count
          * residual reconstructs correctly in the Mobiclip decoder. */
         if( h->param.i_mobiclip )
         {
-            /* Analysis can leave i_partition at D_16x16 on a P_8x8 macroblock.
-             * mobi_encode_p_partition() keys the 16x8 -> 8x8 split on
-             * i_partition, so a stale value makes it write a two-16x8 partition
-             * tree while the MV field really holds four 8x8 MVs -- the decoder
-             * then reconstructs different motion than the encoder did. */
-            if( h->mb.i_type == P_8x8 )
-                h->mb.i_partition = D_8x8;
             mobi_clamp_mvd( h );
             mobi_motion_compensate( h );
         }
