@@ -192,6 +192,28 @@ fail:
     return -1;
 }
 
+/* The quantizer the rate-distortion costs are weighed at.  Mobiclip codes at
+ * mobi_qp(), x264's QP plus six per qyx step (twelve by default), on the same
+ * scale as H.264's, so lambdas taken at x264's own QP priced bits as if the
+ * picture were coded far finer than it is: RD mode decision split and coded
+ * residual it could not afford, and the extra candidates cost time.  Weighing
+ * them halfway to the coding quantizer measured best (BD-rate -1% to -7%
+ * against the old lambdas on Wii, 3DS and DS clips; the full offset made DS
+ * worse); it is also cheaper, as fewer candidates reach RD. */
+static ALWAYS_INLINE int mb_lambda_qp( x264_t *h, int qp )
+{
+#if !HIGH_BIT_DEPTH
+    if( h->param.i_mobiclip )
+    {
+        int extra = h->param.i_mobi_qyx;
+        if( extra < 0 )
+            extra = x264_mobi_env.i_qyx;
+        return x264_clip3( qp + 3 * extra, 0, QP_MAX );
+    }
+#endif
+    return qp;
+}
+
 int x264_analyse_init_costs( x264_t *h )
 {
     int mv_range = h->param.analyse.i_mv_range << PARAM_INTERLACED;
@@ -204,7 +226,7 @@ int x264_analyse_init_costs( x264_t *h )
         logs[i] = log2f( i+1 ) * 2.0f + 1.718f;
 
     for( int qp = X264_MIN( h->param.rc.i_qp_min, QP_MAX_SPEC ); qp <= h->param.rc.i_qp_max; qp++ )
-        if( init_costs( h, logs, qp ) )
+        if( init_costs( h, logs, qp ) || init_costs( h, logs, mb_lambda_qp( h, qp ) ) )
             goto fail;
 
     if( init_costs( h, logs, X264_LOOKAHEAD_QP ) )
@@ -260,19 +282,19 @@ void x264_analyse_weight_frame( x264_t *h, int end )
     }
 }
 
-/* initialize an array of lambda*nbits for all possible mvs */
-static void mb_analyse_load_costs( x264_t *h, x264_mb_analysis_t *a )
+/* initialize an array of lambda*nbits for all possible mvs, at qp */
+static void mb_analyse_load_costs( x264_t *h, x264_mb_analysis_t *a, int qp )
 {
-    a->p_cost_mv = h->cost_mv[a->i_qp];
-    a->p_cost_ref[0] = h->cost_table->ref[a->i_qp][x264_clip3(h->sh.i_num_ref_idx_l0_active-1,0,2)];
-    a->p_cost_ref[1] = h->cost_table->ref[a->i_qp][x264_clip3(h->sh.i_num_ref_idx_l1_active-1,0,2)];
+    a->p_cost_mv = h->cost_mv[qp];
+    a->p_cost_ref[0] = h->cost_table->ref[qp][x264_clip3(h->sh.i_num_ref_idx_l0_active-1,0,2)];
+    a->p_cost_ref[1] = h->cost_table->ref[qp][x264_clip3(h->sh.i_num_ref_idx_l1_active-1,0,2)];
 }
 
 static void mb_analyse_init_qp( x264_t *h, x264_mb_analysis_t *a, int qp )
 {
     int effective_chroma_qp = h->chroma_qp_table[SPEC_QP(qp)] + X264_MAX( qp - QP_MAX_SPEC, 0 );
-    a->i_lambda = x264_lambda_tab[qp];
-    a->i_lambda2 = x264_lambda2_tab[qp];
+    a->i_lambda = x264_lambda_tab[mb_lambda_qp( h, qp )];
+    a->i_lambda2 = x264_lambda2_tab[mb_lambda_qp( h, qp )];
 
     h->mb.b_trellis = h->param.analyse.i_trellis > 1 && a->i_mbrd;
     if( h->param.analyse.i_trellis )
@@ -836,7 +858,7 @@ static void mb_analyse_intra( x264_t *h, x264_mb_analysis_t *a, int i_satd_inter
             return;
     }
 
-    uint16_t *cost_i4x4_mode = h->cost_table->i4x4_mode[a->i_qp] + 8;
+    uint16_t *cost_i4x4_mode = h->cost_table->i4x4_mode[mb_lambda_qp( h, a->i_qp )] + 8;
     /* 8x8 prediction selection */
     if( flags & X264_ANALYSE_I8x8 )
     {
@@ -3362,7 +3384,7 @@ skip_analysis:
             int i_partition;
             int i_satd_inter, i_satd_intra;
 
-            mb_analyse_load_costs( h, &analysis );
+            mb_analyse_load_costs( h, &analysis, mb_lambda_qp( h, analysis.i_qp ) );
 
             mb_analyse_inter_p16x16( h, &analysis );
 
@@ -3834,7 +3856,7 @@ skip_analysis:
             h->mb.b_skip_mc = 0;
             h->mb.i_type = B_DIRECT;
 
-            mb_analyse_load_costs( h, &analysis );
+            mb_analyse_load_costs( h, &analysis, mb_lambda_qp( h, analysis.i_qp ) );
 
             /* select best inter mode */
             /* direct must be first */

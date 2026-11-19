@@ -46,7 +46,7 @@ static void lowres_context_init( x264_t *h, x264_mb_analysis_t *a )
 {
     a->i_qp = X264_LOOKAHEAD_QP;
     a->i_lambda = x264_lambda_tab[ a->i_qp ];
-    mb_analyse_load_costs( h, a );
+    mb_analyse_load_costs( h, a, a->i_qp );
     if( h->param.analyse.i_subpel_refine > 1 )
     {
         h->mb.i_me_method = X264_MIN( X264_ME_HEX, h->param.analyse.i_me_method );
