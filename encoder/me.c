@@ -943,8 +943,14 @@ static void refine_subpel( x264_t *h, x264_me_t *m, int hpel_iters, int qpel_ite
             *p_halfpel_thresh = bcost;
     }
 
-    /* quarterpel diamond search */
-    if( h->mb.i_subpel_refine != 1 )
+    /* quarterpel diamond search.  Mobiclip vectors are half-pel: the encoder
+     * floors x264's quarter-pel vector to half-pel (>> 1) before it predicts
+     * or writes anything, so a quarter-pel step only ever moves the vector to
+     * a position the decoder never sees, scored with a prediction it never
+     * makes.  Stop at half-pel there. */
+    if( h->param.i_mobiclip )
+        ;
+    else if( h->mb.i_subpel_refine != 1 )
     {
         bdir = -1;
         for( int i = qpel_iters; i > 0; i-- )
@@ -1297,8 +1303,13 @@ void x264_me_refine_qpel_rd( x264_t *h, x264_me_t *m, int i_lambda2, int i4, int
         }
     }
 
-    if( bmy < h->mb.mv_min_spel[1] + 3 || bmy > h->mb.mv_max_spel[1] - 3 ||
-        bmx < h->mb.mv_min_spel[0] + 3 || bmx > h->mb.mv_max_spel[0] - 3 )
+    /* Mobiclip vectors are half-pel (see refine_subpel), so search its grid
+     * in steps of two quarter-pels: a one-quarter step only lands on a vector
+     * the encoder floors back to one already tried. */
+    const int s = h->param.i_mobiclip ? 2 : 1;
+    const int margin = 2*s + 1;
+    if( bmy < h->mb.mv_min_spel[1] + margin || bmy > h->mb.mv_max_spel[1] - margin ||
+        bmx < h->mb.mv_min_spel[0] + margin || bmx > h->mb.mv_max_spel[0] - margin )
     {
         h->mb.b_skip_mc = 0;
         return;
@@ -1310,8 +1321,8 @@ void x264_me_refine_qpel_rd( x264_t *h, x264_me_t *m, int i_lambda2, int i4, int
     omy = bmy;
     for( int j = 0; j < 6; j++ )
     {
-        COST_MV_SATD( omx + hex2[j+1][0], omy + hex2[j+1][1], satd, 1 );
-        COST_MV_RD  ( omx + hex2[j+1][0], omy + hex2[j+1][1], satd, 1, j );
+        COST_MV_SATD( omx + s*hex2[j+1][0], omy + s*hex2[j+1][1], satd, 1 );
+        COST_MV_RD  ( omx + s*hex2[j+1][0], omy + s*hex2[j+1][1], satd, 1, j );
     }
 
     if( dir != -2 )
@@ -1320,16 +1331,16 @@ void x264_me_refine_qpel_rd( x264_t *h, x264_me_t *m, int i_lambda2, int i4, int
         for( int i = 1; i < 10; i++ )
         {
             const int odir = mod6m1[dir+1];
-            if( bmy < h->mb.mv_min_spel[1] + 3 ||
-                bmy > h->mb.mv_max_spel[1] - 3 )
+            if( bmy < h->mb.mv_min_spel[1] + margin ||
+                bmy > h->mb.mv_max_spel[1] - margin )
                 break;
             dir = -2;
             omx = bmx;
             omy = bmy;
             for( int j = 0; j < 3; j++ )
             {
-                COST_MV_SATD( omx + hex2[odir+j][0], omy + hex2[odir+j][1], satd, 1 );
-                COST_MV_RD  ( omx + hex2[odir+j][0], omy + hex2[odir+j][1], satd, 1, odir-1+j );
+                COST_MV_SATD( omx + s*hex2[odir+j][0], omy + s*hex2[odir+j][1], satd, 1 );
+                COST_MV_RD  ( omx + s*hex2[odir+j][0], omy + s*hex2[odir+j][1], satd, 1, odir-1+j );
             }
             if( dir == -2 )
                 break;
@@ -1341,8 +1352,8 @@ void x264_me_refine_qpel_rd( x264_t *h, x264_me_t *m, int i_lambda2, int i4, int
     omy = bmy;
     for( int i = 0; i < 8; i++ )
     {
-        COST_MV_SATD( omx + square1[i+1][0], omy + square1[i+1][1], satd, 1 );
-        COST_MV_RD  ( omx + square1[i+1][0], omy + square1[i+1][1], satd, 0, 0 );
+        COST_MV_SATD( omx + s*square1[i+1][0], omy + s*square1[i+1][1], satd, 1 );
+        COST_MV_RD  ( omx + s*square1[i+1][0], omy + s*square1[i+1][1], satd, 0, 0 );
     }
 
     m->cost = bcost;
