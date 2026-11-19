@@ -3511,8 +3511,11 @@ skip_analysis:
              * is already flagged elsewhere (encoder/encoder.c, MOBI_PSUB8x8)
              * as not-yet-reconstruction-exact, and this re-score assumes
              * every D_8x8 quadrant is a plain 8x8 (true whenever PSUB8x8 is
-             * off, which is this fork's mobiclip default). */
-            if( h->param.i_mobiclip && !(flags & X264_ANALYSE_PSUB8x8) )
+             * off, which is this fork's mobiclip default).
+             * With RD mode decision (subme >= 6) mb_analyse_p_rd() picks the
+             * partition again from scratch, so the re-score would be thrown
+             * away: skip it there. */
+            if( h->param.i_mobiclip && !(flags & X264_ANALYSE_PSUB8x8) && !analysis.i_mbrd )
             {
 #define MOBI_MV_OF( m ) (m)->mv[0], (m)->mv[1]
                 int qp = mobi_qp( h, h->mb.i_qp );
